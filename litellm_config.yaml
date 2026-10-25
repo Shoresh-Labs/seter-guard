@@ -1,0 +1,13 @@
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+guardrails:
+  - guardrail_name: seter-pii
+    litellm_params:
+      guardrail: generic_guardrail_api
+      mode: pre_call            # mask personal data before it reaches the model
+      api_base: http://localhost:8080
+      default_on: true
