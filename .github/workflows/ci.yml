@@ -1,0 +1,28 @@
+name: ci
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"   # weekly: catches breaking transformers releases
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        transformers: ["4.57.6", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu torch
+          pip install fastapi httpx pytest
+          if [ "${{ matrix.transformers }}" = "latest" ]; then pip install -U transformers; else pip install "transformers==${{ matrix.transformers }}"; fi
+      - name: Test with the real model
+        run: pytest -q tests
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t seter-guard .
