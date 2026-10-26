@@ -15,6 +15,17 @@ curl -s localhost:8080/v1/redact -H 'content-type: application/json' \
 # {"text":"שלום, קוראים לי [PERSON], [PHONE]", "entities":[...]}
 ```
 
+### Hugging Face token (optional)
+
+The Seter models are public, so no token is needed. To use a private or gated model, or to avoid anonymous rate limits, set `HF_TOKEN`:
+
+```bash
+# build: passed as a secret, never stored in the image
+HF_TOKEN=hf_... docker build --secret id=hf_token,env=HF_TOKEN -t seter-guard .
+# local run without Docker: transformers picks up HF_TOKEN from the environment
+HF_TOKEN=hf_... uvicorn server:app
+```
+
 ## Use with LiteLLM
 
 LiteLLM's [Generic Guardrail API](https://docs.litellm.ai/docs/adding_provider/generic_guardrail_api) calls `POST /beta/litellm_basic_guardrail_api`, which this server implements. See `litellm_config.yaml`:

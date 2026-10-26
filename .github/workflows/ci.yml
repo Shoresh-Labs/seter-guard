@@ -20,6 +20,8 @@ jobs:
           pip install fastapi httpx pytest
           if [ "${{ matrix.transformers }}" = "latest" ]; then pip install -U transformers; else pip install "transformers==${{ matrix.transformers }}"; fi
       - name: Test with the real model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}  # optional; avoids anonymous Hub rate limits
         run: pytest -q tests
   docker:
     runs-on: ubuntu-latest
