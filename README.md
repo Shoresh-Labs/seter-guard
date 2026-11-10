@@ -39,14 +39,14 @@ guardrails:
       api_base: http://localhost:8080
 ```
 
-`SETER_ACTION=block` blocks requests containing personal data instead of masking them. `SETER_MODEL=shoresh-labs/seter-pii-he-ar` uses the larger, more accurate model.
+`SETER_ACTION=block` blocks requests containing personal data instead of masking them. `SETER_MODEL=shoresh-labs/seter-pii-he-ar` uses the larger, more accurate **v1.1** model. The default image still loads `seter-pii-he-ar-fast`, which is the **v1.0** (25 Oct 2026) fast checkpoint.
 
 ## Accuracy (REDACT benchmark, char-level F1)
 
-| | OpenAI privacy-filter | Seter | Seter Fast |
+| | OpenAI privacy-filter | Seter v1.1 large, mean of 3 seeds (released) | Seter Fast (v1.0) |
 |---|---|---|---|
-| Hebrew | 0.63 | 0.87 | 0.84 |
-| Arabic | 0.72 | 0.89 | 0.88 |
-| English | 0.70 | 0.84 | 0.83 |
+| Hebrew | 0.63 | 0.900 (0.904) | 0.84 |
+| Arabic | 0.72 | 0.912 (0.917) | 0.88 |
+| English | 0.70 | 0.871 (0.878) | 0.83 |
 
-A redaction aid, not an anonymization guarantee. MIT licensed.
+A redaction aid, not an anonymization guarantee. MIT licensed. Numbers and caveats: [seter-pii-he-ar model card](https://huggingface.co/shoresh-labs/seter-pii-he-ar).
