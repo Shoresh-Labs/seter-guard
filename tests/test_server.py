@@ -42,3 +42,27 @@ def test_personal_data_at_the_end_of_a_long_text_is_masked():
     for e in r["entities"]:                                                     # offsets point into the original text
         assert 0 <= e["start"] < e["end"] <= len(t)
     assert t[r["entities"][-1]["start"]:r["entities"][-1]["end"]] == "052-3318874"
+
+
+def test_windows_cover_the_text_and_overlap(monkeypatch):
+    monkeypatch.setattr(server, "WINDOW", 40)
+    monkeypatch.setattr(server, "OVERLAP", 10)
+    t = FILLER * 30
+    w = server.windows(t)
+    assert len(w) > 5 and w[0][0] == 0 and w[-1][1] == len(t)
+    for (a, b), (a2, b2) in zip(w, w[1:]):
+        assert a < a2 < b < b2                                                  # no gap between neighbours
+    for a, b in w:
+        assert len(server.ner.tokenizer(t[a:b], add_special_tokens=False)["input_ids"]) <= 42
+    assert server.windows("short text") == [(0, 10)]
+
+
+def test_an_entity_seen_by_two_windows_is_masked_once(monkeypatch):
+    monkeypatch.setattr(server, "WINDOW", 40)
+    monkeypatch.setattr(server, "OVERLAP", 20)
+    t = FILLER * 3 + "Please call Dana Levi on 054-7812345 before noon. " + FILLER * 3
+    r = c.post("/v1/redact", json={"text": t}).json()
+    assert r["text"].count("[PHONE]") == 1 and "054-7812345" not in r["text"] and "Dana Levi" not in r["text"]
+    starts = [e["start"] for e in r["entities"]]
+    assert starts == sorted(starts) and len(set(starts)) == len(starts)
+    assert all(x["end"] <= y["start"] for x, y in zip(r["entities"], r["entities"][1:]))

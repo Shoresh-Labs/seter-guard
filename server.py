@@ -17,17 +17,52 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 ner = pipeline("token-classification", model=MODEL, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
 
+# The pipeline reads one window of text per call and silently drops whatever is past the model's limit
+# (512 tokens for the large model, about 8,000 for the fast one). A guardrail must read all of it, so long
+# texts are scanned in overlapping windows and the results joined.
+WINDOW = int(os.environ.get("SETER_WINDOW_TOKENS", "480"))    # tokens per window, below every model's limit
+OVERLAP = int(os.environ.get("SETER_OVERLAP_TOKENS", "96"))   # shared by neighbouring windows
+assert 0 <= OVERLAP < WINDOW, "SETER_OVERLAP_TOKENS must be smaller than SETER_WINDOW_TOKENS"
+
+
+def windows(text: str):
+    """Character ranges that cover `text`, each at most WINDOW tokens long."""
+    offs = ner.tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
+    if len(offs) <= WINDOW:
+        return [(0, len(text))]
+    out, i = [], 0
+    while True:
+        j = min(i + WINDOW, len(offs))
+        out.append((0 if i == 0 else offs[i][0], len(text) if j == len(offs) else offs[j - 1][1]))
+        if j == len(offs):
+            return out
+        i = j - OVERLAP
+
+
+def entities(text: str):
+    """Model output for the whole text, with character offsets into `text`."""
+    out = []
+    for a, b in windows(text):
+        for e in ner(text[a:b]):
+            out.append({**e, "start": e["start"] + a, "end": e["end"] + a})
+    return out
+
 
 def spans(text: str):
     out = []
-    for e in sorted(ner(text), key=lambda e: e["start"]):
+    for e in sorted(entities(text), key=lambda e: (e["start"], e["end"])):
         if e["score"] < MIN_SCORE:
             continue
         a, b, t = e["start"], e["end"], TAGS.get(e["entity_group"], "PII")
         while a < b and text[a].isspace():
             a += 1
+        if a >= b:
+            continue
+        if out and a < out[-1][1]:
+            # the same text seen by two windows: keep the union (when in doubt, mask); the first type wins
+            out[-1] = (out[-1][0], max(out[-1][1], b), out[-1][2])
         # merge neighbours of the same type separated only by whitespace (e.g. أبو خالد)
-        if out and out[-1][2] == t and text[out[-1][1]:a].strip() == "":
+        elif out and out[-1][2] == t and text[out[-1][1]:a].strip() == "":
             out[-1] = (out[-1][0], b, t)
         else:
             out.append((a, b, t))
