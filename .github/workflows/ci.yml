@@ -28,3 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t seter-guard .
+      - name: The image starts with no network, runs the pinned model and masks
+        run: |
+          docker run --rm --network none seter-guard python -c "
+          import server
+          text, found = server.mask('Call Dana Levi on 054-7812345')
+          assert '054-7812345' not in text and 'Dana' not in text, text
+          assert server.REVISION == server.DEFAULT_MODEL.split('@')[1] and server.COMMIT, (server.REVISION, server.COMMIT)
+          print(text, '|', server.MODEL, server.REVISION, server.COMMIT)"

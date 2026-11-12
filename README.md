@@ -43,19 +43,37 @@ guardrails:
 
 ## Choosing and pinning the model
 
-`SETER_MODEL` is a Hugging Face repo, optionally followed by `@` and a version:
+`SETER_MODEL` is a Hugging Face repo followed by `@` and a version, or a local folder:
 
 | `SETER_MODEL` | What you get |
 |---|---|
-| `shoresh-labs/seter-pii-he-ar-fast@v1.1` | the fast model, pinned (the Docker image's default) |
+| `shoresh-labs/seter-pii-he-ar-fast@v1.1` | the fast model, pinned. This is the default, with or without Docker. |
 | `shoresh-labs/seter-pii-he-ar@v1.2` | the larger, more accurate model, pinned (about 2.3× slower on CPU) |
 | a repo without `@version` | whatever is newest in that repo; it changes when a new version is published |
+| a local folder | the model in that folder |
 
-The Docker image downloads the model when it is built. To use another model, change `ENV SETER_MODEL` in the Dockerfile and rebuild, or run without Docker: `SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 uvicorn server:app`. `GET /health` reports the model and version in use.
+`repo@` with nothing after it is refused, so a template with an unset version cannot quietly load the newest weights. `GET /health` reports the model, the version asked for, and the commit that was actually loaded.
+
+With Docker the model is downloaded when the image is built, and the container never contacts the Hub afterwards (`HF_HUB_OFFLINE=1`), so a running image cannot change model. To build with another model:
+
+```bash
+docker build --build-arg SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 -t seter-guard .
+```
+
+Setting `SETER_MODEL` only at `docker run` to a model that is not in the image fails at start; rebuild, or add `-e HF_HUB_OFFLINE=0` to let the container download it. Without Docker: `SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 uvicorn server:app`.
 
 ## Long texts
 
-Texts longer than one model window are scanned in overlapping windows (480 tokens, 96 shared), so personal data at the end of a long prompt is masked like data at the start. `SETER_WINDOW_TOKENS` and `SETER_OVERLAP_TOKENS` change the sizes.
+A model reads a limited number of tokens per call (512 for the large model, about 8,000 for the fast one) and the plain pipeline silently ignores the rest. Seter Guard therefore cuts long texts into overlapping windows that start at word boundaries, scans each, and joins the results, so personal data at the end of a long prompt is masked like data at the start.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SETER_WINDOW_TOKENS` | 510 | Tokens per window. Must not exceed what the model reads in one call (the server refuses to start otherwise). The models are trained and scored on windows of this size; the fast model accepts up to about 8,000, which is faster per token of text but is not what the published scores measure. |
+| `SETER_OVERLAP_TOKENS` | 96 | Tokens shared by neighbouring windows (8 to half the window). What a window finds right next to a cut is taken from its neighbour instead. |
+| `SETER_BATCH_SIZE` | 4 | Windows sent to the model together. |
+| `SETER_MAX_TOKENS` | 50000 | Longest text accepted. A longer one is refused (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. |
+
+Texts that fit in one window take a single model call, as before.
 
 ## Accuracy
 
