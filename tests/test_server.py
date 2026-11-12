@@ -100,7 +100,7 @@ def placements(probe):
     ("Order 22091 shipped on 2026-03-15 to the warehouse. ", [], [], ["Order 22091 shipped on 2026-03-15 to the warehouse."]),
     ("Please call Dana Levi on 054-7812345 before noon. ", ["Dana Levi", "054-7812345"], ["[PERSON]", "[PHONE]"], ["before noon."]),
     ("מספר תעודת זהות 318845127 נמסר לפקיד. ", ["318845127"], ["[ID]"], ["נמסר לפקיד"]),
-    ("يا أبو خالد، ابنك سامر اتصل من 0559023417. ", ["خالد", "سامر", "0559023417"], ["[PERSON]", "[PHONE]"], ["اتصل من"]),
+    ("يا أبو خالد، ابنك سامر اتصل من 0559023417. ", ["خالد", "سامر", "0559023417"], ["[PERSON]", "[PERSON]", "[PHONE]"], ["اتصل من"]),
     ("הנתבע, מר עזרא בן שושן, מתגורר ברחוב הלל יפה 7, חיפה. ", ["עזרא בן שושן", "הלל יפה 7"], ["[PERSON]", "[ADDRESS]"], ["הנתבע"]),
 ])
 def test_entities_at_a_cut_are_masked_with_the_right_type(probe, hidden, tags, kept):
@@ -115,8 +115,8 @@ def test_entities_at_a_cut_are_masked_with_the_right_type(probe, hidden, tags, k
         mid = got[len(head):len(got) - len(tail)]
         for h in hidden:
             assert h not in mid, (kind, mid)
-        for tag in tags:
-            assert mid.count(tag) == 1, (kind, mid)                        # masked once, with the right type
+        for tag in set(tags):
+            assert mid.count(tag) == tags.count(tag), (kind, mid)          # each entity masked once, with the right type
         for k in kept:
             assert k in mid, (kind, mid)
         if "[ID]" in tags:
