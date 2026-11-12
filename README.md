@@ -41,6 +41,19 @@ guardrails:
 
 `SETER_ACTION=block` blocks requests containing personal data instead of masking them. `SETER_MODEL=shoresh-labs/seter-pii-he-ar` uses the larger, more accurate **v1.1** model. The default image still loads `seter-pii-he-ar-fast`, which is the **v1.0** (25 Oct 2026) fast checkpoint.
 
+## Long texts
+
+A model reads a limited number of tokens per call (512 for the large model, about 8,000 for the fast one) and the plain pipeline silently ignores the rest. Seter Guard therefore cuts long texts into overlapping windows that start at word boundaries, scans each, and joins the results, so personal data at the end of a long prompt is masked like data at the start.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SETER_WINDOW_TOKENS` | 510 | Tokens per window. Must not exceed what the model reads in one call (the server refuses to start otherwise). The models are trained and scored on windows of this size; the fast model accepts up to about 8,000, which is faster per token of text but is not what the published scores measure. |
+| `SETER_OVERLAP_TOKENS` | 96 | Tokens shared by neighbouring windows (8 to half the window). What a window finds right next to a cut is taken from its neighbour instead. |
+| `SETER_BATCH_SIZE` | 4 | Windows sent to the model together. |
+| `SETER_MAX_TOKENS` | 50000 | Longest text accepted. A longer one is refused (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. |
+
+Texts that fit in one window take a single model call, as before.
+
 ## Accuracy (REDACT benchmark, char-level F1)
 
 | | OpenAI privacy-filter | Seter v1.1 large, mean of 3 seeds (released) | Seter Fast (v1.0) |
