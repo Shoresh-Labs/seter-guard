@@ -70,47 +70,82 @@ def test_windows_cover_the_text_start_at_words_and_fit_the_model():
     assert server.windows("short text") == [(0, 10, 0, 10, 0, 10)]
 
 
-@pytest.mark.parametrize("probe", [
-    "Write to dana.levi@example.co.il about it. ",
-    "Order 22091 shipped on 2026-03-15 to the warehouse. ",
-    "Please call Dana Levi on 054-7812345 before noon. ",
-])
-def test_text_near_a_window_boundary_reads_as_it_does_alone(probe):
-    # Slide the probe across the first boundary. Whatever the cut does, an email must not turn into a name,
-    # a date must not be half-masked, and an entity must be masked exactly once.
-    alone = c.post("/v1/redact", json={"text": probe}).json()["text"]
-    tail = FILLER * 30
-    for pad in range(58, 82, 3):
-        head = FILLER * 27 + "Filler " * pad
-        got = c.post("/v1/redact", json={"text": head + probe + tail}).json()["text"]
-        assert got == head + alone + tail, (pad, got[len(head) - 20:len(head) + 80])
+def placements(probe):
+    """Texts that put `probe` where cut handling can go wrong, located with server.windows() itself, so the
+    test cannot drift away from the cuts when a tokenizer or a default changes.
+      starts_next_window  the second window begins inside the probe
+      just_after_cut      the probe lies wholly in the second window's untrusted first tokens
+      across_trust_edge   the probe straddles the point where the second window starts to be trusted
+      ends_first_window   the first window ends inside the probe"""
+    tail, found = FILLER * 30, {}
+    for pad in range(0, 200):
+        head = FILLER * 24 + "Filler " * pad
+        t = head + probe + tail
+        w = server.windows(t)
+        if len(w) < 2:
+            continue
+        ps, pe = len(head), len(head) + len(probe.rstrip())
+        start1, trust1, end0 = w[1][0], w[1][2], w[0][1]
+        kind = ("starts_next_window" if ps < start1 < pe else
+                "just_after_cut" if start1 <= ps and pe <= trust1 else
+                "across_trust_edge" if ps < trust1 < pe else
+                "ends_first_window" if ps < end0 < pe else None)
+        if kind and kind not in found:
+            found[kind] = (head, t)
+    return found, tail
 
 
 @pytest.mark.parametrize("probe,hidden,tags,kept", [
+    ("Write to dana.levi@example.co.il about it. ", ["dana.levi@example.co.il"], ["[EMAIL]"], ["Write to", "about it."]),
+    ("Order 22091 shipped on 2026-03-15 to the warehouse. ", [], [], ["Order 22091 shipped on 2026-03-15 to the warehouse."]),
+    ("Please call Dana Levi on 054-7812345 before noon. ", ["Dana Levi", "054-7812345"], ["[PERSON]", "[PHONE]"], ["before noon."]),
     ("מספר תעודת זהות 318845127 נמסר לפקיד. ", ["318845127"], ["[ID]"], ["נמסר לפקיד"]),
     ("يا أبو خالد، ابنك سامر اتصل من 0559023417. ", ["خالد", "سامر", "0559023417"], ["[PERSON]", "[PHONE]"], ["اتصل من"]),
     ("הנתבע, מר עזרא בן שושן, מתגורר ברחוב הלל יפה 7, חיפה. ", ["עזרא בן שושן", "הלל יפה 7"], ["[PERSON]", "[ADDRESS]"], ["הנתבע"]),
 ])
-def test_hebrew_and_arabic_entities_keep_their_type_at_every_position_across_a_boundary(probe, hidden, tags, kept):
-    # An id whose label was cut away used to come out as a phone number, and a kunya lost its first word.
-    # The comparison with one pass over the whole text is deliberately not exact: on a 1,300-token context the
-    # model itself sometimes masks one more word than it does on 510 tokens, which is not a boundary effect.
-    head0, tail = FILLER * 27, FILLER * 30
-    for pad in range(58, 82, 3):
-        head = head0 + "Filler " * pad
-        t = head + probe + tail
-        assert len(server.windows(t)) > 1
+def test_entities_at_a_cut_are_masked_with_the_right_type(probe, hidden, tags, kept):
+    # An email cut in half used to come out as a name, an id whose label was cut away as a phone number, and a
+    # date as "2026-[PHONE]3-15". The comparison with one pass over the whole text is deliberately not exact:
+    # on a 1,300-token context the model itself sometimes masks one more word than on 510 tokens.
+    found, tail = placements(probe)
+    assert {"starts_next_window", "across_trust_edge", "ends_first_window"} <= set(found), sorted(found)
+    for kind, (head, t) in found.items():
         got = server.mask(t)[0]
-        assert got.startswith(head) and got.endswith(tail), pad          # nothing around it was touched
+        assert got.startswith(head) and got.endswith(tail), kind         # nothing around the probe was touched
         mid = got[len(head):len(got) - len(tail)]
         for h in hidden:
-            assert h not in mid, (pad, mid)
+            assert h not in mid, (kind, mid)
         for tag in tags:
-            assert tag in mid, (pad, mid)
+            assert mid.count(tag) == 1, (kind, mid)                        # masked once, with the right type
         for k in kept:
-            assert k in mid, (pad, mid)
+            assert k in mid, (kind, mid)
         if "[ID]" in tags:
-            assert "[PHONE]" not in mid, (pad, mid)
+            assert "[PHONE]" not in mid, (kind, mid)
+
+
+def test_the_window_that_owns_the_text_decides_the_type(monkeypatch):
+    # The next window saw the number without its label and called it a phone, starting one character earlier.
+    text = "ID (318845127) on file"
+    def fake(_text):
+        return [{"entity_group": "private_phone", "score": 0.9, "start": 3, "end": 13, "owner": False},
+                {"entity_group": "account_number", "score": 0.9, "start": 4, "end": 13, "owner": True}]
+    monkeypatch.setattr(server, "entities", fake)
+    assert server.spans(text) == [(3, 13, "ID")]
+    assert server.mask(text)[0] == "ID [ID]) on file"
+
+
+def test_tokens_not_characters_decide_whether_a_text_needs_windows(monkeypatch):
+    # Some characters become several tokens, so a text can be short in characters and still too long for one call.
+    monkeypatch.setattr(server, "WINDOW", 128)
+    monkeypatch.setattr(server, "OVERLAP", 64)
+    for unit in ("\ufdfa ", "\u33a1 ", "\u2167 "):
+        t = unit * 60
+        if len(t) <= 128 < ntok(t):
+            w = server.windows(t)
+            assert len(w) > 1 and all(ntok(t[a:b]) <= 128 for a, b, *_ in w)
+            return
+    t = "x " * 127 + "y"                                                 # this tokenizer does not expand those characters
+    assert (len(server.windows(t)) > 1) == (ntok(t) > 128)
 
 
 def test_concurrent_requests():
@@ -119,6 +154,8 @@ def test_concurrent_requests():
     long_t = "Contact Dana Levi at 054-7812345. " + FILLER * 60 + "Send the contract to Yossi Cohen, phone 052-3318874."
     short_t = "Please call Dana Levi on 054-7812345 before noon."
     want = {t: server.mask(t) for t in (long_t, short_t)}
+    # the truncation setting each tokenizer was left with at import must not change again under load
+    state = (server.wtok._tokenizer.truncation, server.wtok._tokenizer.padding)
 
     def one(i):
         t = long_t if i % 2 else short_t
@@ -126,6 +163,7 @@ def test_concurrent_requests():
 
     with ThreadPoolExecutor(4) as ex:
         assert all(ex.map(one, range(24)))
+    assert state == (server.wtok._tokenizer.truncation, server.wtok._tokenizer.padding) == (None, None)
 
 
 def test_a_text_too_long_to_scan_is_refused_not_passed_through(monkeypatch):
@@ -135,12 +173,21 @@ def test_a_text_too_long_to_scan_is_refused_not_passed_through(monkeypatch):
     assert r.status_code == 413 and "054-7812345" not in r.text
     g = c.post("/beta/litellm_basic_guardrail_api", json={"texts": ["fine", t]}).json()
     assert g["action"] == "BLOCKED" and "too long" in g["blocked_reason"].lower()
+    # the limit is for the whole request, and it is checked before any text is scanned
+    half = FILLER * 20
+    assert ntok(half) <= 600 < 2 * ntok(half)
+    def must_not_run(_t):
+        raise AssertionError("a text was scanned although the request is over the limit")
+    monkeypatch.setattr(server, "mask", must_not_run)
+    g = c.post("/beta/litellm_basic_guardrail_api", json={"texts": [half, half]}).json()
+    assert g["action"] == "BLOCKED" and "too long" in g["blocked_reason"].lower()
 
 
 def test_settings_that_would_skip_text_are_rejected(monkeypatch):
     limit = server._model_limit()
-    for env in ({"SETER_WINDOW_TOKENS": str(limit + 1)}, {"SETER_WINDOW_TOKENS": "8"},
-                {"SETER_OVERLAP_TOKENS": "0"}, {"SETER_WINDOW_TOKENS": "200", "SETER_OVERLAP_TOKENS": "150"}):
+    for env in ({"SETER_WINDOW_TOKENS": str(limit + 1)}, {"SETER_WINDOW_TOKENS": "100"},
+                {"SETER_OVERLAP_TOKENS": "0"}, {"SETER_OVERLAP_TOKENS": "8"},   # 8 let a long address fall between two windows
+                {"SETER_WINDOW_TOKENS": "200", "SETER_OVERLAP_TOKENS": "150"}):
         for k in ("SETER_WINDOW_TOKENS", "SETER_OVERLAP_TOKENS"):
             monkeypatch.delenv(k, raising=False)
         for k, v in env.items():
@@ -150,4 +197,4 @@ def test_settings_that_would_skip_text_are_rejected(monkeypatch):
     for k in ("SETER_WINDOW_TOKENS", "SETER_OVERLAP_TOKENS"):
         monkeypatch.delenv(k, raising=False)
     window, overlap, _, _ = server._settings()
-    assert window <= limit and 8 <= overlap <= window // 2
+    assert window <= limit and server.MIN_OVERLAP <= overlap <= window // 2

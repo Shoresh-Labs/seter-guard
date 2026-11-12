@@ -48,9 +48,9 @@ A model reads a limited number of tokens per call (512 for the large model, abou
 | Variable | Default | Meaning |
 |---|---|---|
 | `SETER_WINDOW_TOKENS` | 510 | Tokens per window. Must not exceed what the model reads in one call (the server refuses to start otherwise). The models are trained and scored on windows of this size; the fast model accepts up to about 8,000, which is faster per token of text but is not what the published scores measure. |
-| `SETER_OVERLAP_TOKENS` | 96 | Tokens shared by neighbouring windows (8 to half the window). What a window finds right next to a cut is taken from its neighbour instead. |
+| `SETER_OVERLAP_TOKENS` | 96 | Tokens shared by neighbouring windows (64 to half the window). What a window finds right next to a cut is taken from its neighbour instead, so the shared part must be longer than any single entity. |
 | `SETER_BATCH_SIZE` | 4 | Windows sent to the model together. |
-| `SETER_MAX_TOKENS` | 50000 | Longest text accepted. A longer one is refused (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. |
+| `SETER_MAX_TOKENS` | 16000 | Most tokens accepted in one request (all texts of a LiteLLM call together). More is refused before any scanning (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. On a CPU a window takes on the order of a second, so the default is about 40 windows. |
 
 Texts that fit in one window take a single model call, as before.
 
