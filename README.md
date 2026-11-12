@@ -52,7 +52,7 @@ guardrails:
 | a repo without `@version` | whatever is newest in that repo; it changes when a new version is published |
 | a local folder | the model in that folder |
 
-`repo@` with nothing after it is refused, so a template with an unset version cannot quietly load the newest weights. `GET /health` reports the model, the version asked for, and the commit that was actually loaded.
+`repo@` with nothing after it is refused, so a template with an unset version cannot quietly load the newest weights. The version is resolved to a commit once at start and everything is loaded by that commit. For the default, the server also checks that `v1.1` still points to the commit it did when this release was made, and refuses to start if the tag was moved. `GET /health` reports `model`, `source` (`hub` or `local`), `pinned`, the `revision` asked for and the `commit` actually loaded.
 
 With Docker the model is downloaded when the image is built, and the container never contacts the Hub afterwards (`HF_HUB_OFFLINE=1`), so a running image cannot change model. To build with another model:
 
@@ -60,7 +60,7 @@ With Docker the model is downloaded when the image is built, and the container n
 docker build --build-arg SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 -t seter-guard .
 ```
 
-Setting `SETER_MODEL` only at `docker run` to a model that is not in the image fails at start; rebuild, or add `-e HF_HUB_OFFLINE=0` to let the container download it. Without Docker: `SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 uvicorn server:app`.
+The image can load only the exact `SETER_MODEL` it was built with. Setting another value at `docker run` fails at start with a message saying so; this includes the same repo without its `@version`, which means "newest" and needs the Hub. Rebuild, or add `-e HF_HUB_OFFLINE=0` to let the container download. Without Docker: `SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 uvicorn server:app`.
 
 ## Long texts
 
@@ -69,9 +69,9 @@ A model reads a limited number of tokens per call (512 for the large model, abou
 | Variable | Default | Meaning |
 |---|---|---|
 | `SETER_WINDOW_TOKENS` | 510 | Tokens per window. Must not exceed what the model reads in one call (the server refuses to start otherwise). The models are trained and scored on windows of this size; the fast model accepts up to about 8,000, which is faster per token of text but is not what the published scores measure. |
-| `SETER_OVERLAP_TOKENS` | 96 | Tokens shared by neighbouring windows (8 to half the window). What a window finds right next to a cut is taken from its neighbour instead. |
+| `SETER_OVERLAP_TOKENS` | 96 | Tokens shared by neighbouring windows (64 to half the window). What a window finds right next to a cut is taken from its neighbour instead, so the shared part must be longer than any single entity. |
 | `SETER_BATCH_SIZE` | 4 | Windows sent to the model together. |
-| `SETER_MAX_TOKENS` | 50000 | Longest text accepted. A longer one is refused (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. |
+| `SETER_MAX_TOKENS` | 16000 | Most tokens accepted in one request (all texts of a LiteLLM call together). More is refused before any scanning (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. On a CPU a window takes on the order of a second, so the default is about 40 windows. |
 
 Texts that fit in one window take a single model call, as before.
 

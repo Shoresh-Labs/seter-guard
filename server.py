@@ -3,55 +3,75 @@
 Implements LiteLLM's Generic Guardrail API (POST /beta/litellm_basic_guardrail_api)
 plus a plain /v1/redact endpoint. Runs fully on your own machine: no text leaves it.
 """
-import bisect, os
+import bisect, os, re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
 
 DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1"
+# The commit that tag pointed to when this line was written. A tag can be moved on the Hub; if v1.1 ever
+# resolves to anything else the server refuses to start instead of running weights nobody chose.
+DEFAULT_COMMIT = "2744c393718de9a911d9db3478341984a99a7cdb"
+_REPO_ID = re.compile(r"^[\w.-]+(/[\w.-]+)?$")
 
 
 def parse_model(value: str):
-    """SETER_MODEL -> (model, revision). `repo@version` pins a Hub repo to a tag, branch or commit; a repo
-    without `@` means its newest weights, which change when a new version is published; an existing local
-    path is used as it is, whatever characters it contains."""
+    """SETER_MODEL -> (model, revision, is_local).
+
+    An existing folder is used as it is, whatever characters its path contains. Otherwise the value is a Hub
+    repo, `org/name@version` (a tag, branch or commit) or `org/name` alone, which means the newest weights
+    and changes when a new version is published."""
     value = value.strip()
     if not value:
         raise ValueError("SETER_MODEL is empty")
-    if os.path.exists(value) or "@" not in value:
-        return value, None
-    model, _, revision = value.rpartition("@")
-    if not model or not revision:
-        raise ValueError(f"SETER_MODEL={value!r}: expected repo@version (for example {DEFAULT_MODEL}); "
+    if os.path.isdir(value):
+        return value, None, True
+    repo, sep, revision = value.rpartition("@") if "@" in value else (value, "", "")
+    if not _REPO_ID.match(repo):
+        raise ValueError(f"SETER_MODEL={value!r} is neither an existing folder nor a Hub repo (org/name or org/name@version)")
+    if sep and not revision:
+        raise ValueError(f"SETER_MODEL={value!r}: nothing after '@' (for example {DEFAULT_MODEL}); "
                          "an empty version would silently load the newest weights")
-    return model, revision
+    if os.path.isdir(repo):  # transformers prefers a local folder of that name and would ignore the version
+        raise ValueError(f"a folder named {repo!r} exists in the working directory and would be loaded in place of the "
+                         f"Hub repo, ignoring the version. Use its path (./{repo}) to load it, or start from another directory")
+    return repo, revision or None, False
 
 
-MODEL, REVISION = parse_model(os.environ.get("SETER_MODEL", DEFAULT_MODEL))
+def resolve_commit(model, revision, is_local):
+    """The Hub commit behind `revision`, looked up once. Everything is then loaded by that commit, so the
+    pipeline, the window tokenizer and /health cannot disagree, and a tag that moves later changes nothing."""
+    if is_local:
+        return None
+    from huggingface_hub import hf_hub_download
+    try:
+        path = hf_hub_download(model, "config.json", revision=revision)
+    except Exception as e:  # noqa: BLE001 - re-raised with what the operator needs to know
+        hint = ""
+        if os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes", "on"):
+            baked = os.environ.get("SETER_BAKED_MODEL")
+            hint = (" This process is offline (HF_HUB_OFFLINE=1) and can only load what is already downloaded"
+                    + (f": this image was built with SETER_MODEL={baked}" if baked else "")
+                    + ". Use that exact value (the version after '@' included), rebuild the image with "
+                      "--build-arg SETER_MODEL=..., or set HF_HUB_OFFLINE=0 to allow a download.")
+        raise RuntimeError(f"cannot load {model} at version {revision or 'main (not pinned)'}: {type(e).__name__}.{hint}") from e
+    m = re.search(r"snapshots[/\\]([0-9a-f]{40})[/\\]", path)
+    if not m:
+        raise RuntimeError(f"cannot tell which commit of {model} was resolved (cache path {path!r})")
+    return m.group(1)
+
+
+MODEL, REVISION, IS_LOCAL = parse_model(os.environ.get("SETER_MODEL", DEFAULT_MODEL))
+COMMIT = resolve_commit(MODEL, REVISION, IS_LOCAL)
+if (MODEL, REVISION) == parse_model(DEFAULT_MODEL)[:2] and COMMIT != DEFAULT_COMMIT:
+    raise RuntimeError(f"{DEFAULT_MODEL} now resolves to commit {COMMIT}, not {DEFAULT_COMMIT}: the tag was moved. "
+                       f"Pin SETER_MODEL to a commit you trust (repo@<commit>) to start anyway")
 TAGS = {"private_person": "PERSON", "private_address": "ADDRESS", "private_phone": "PHONE",
         "private_email": "EMAIL", "account_number": "ID"}
 MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 
-ner = pipeline("token-classification", model=MODEL, revision=REVISION, aggregation_strategy="simple")
-
-
-def _loaded_commit():
-    """The Hub commit the weights came from (None for a local folder). A tag or "main" can move; this cannot."""
-    commit = getattr(ner.model.config, "_commit_hash", None)  # not set by every transformers release
-    if commit or os.path.exists(MODEL):
-        return commit
-    try:  # the cache path of a file just loaded is .../snapshots/<commit>/config.json; works offline
-        from huggingface_hub import try_to_load_from_cache
-        path = try_to_load_from_cache(MODEL, "config.json", revision=REVISION)
-        if isinstance(path, str) and "/snapshots/" in path:
-            return path.split("/snapshots/")[1].split("/")[0]
-    except Exception:  # noqa: BLE001 - reporting only; never stop the server for this
-        pass
-    return None
-
-
-COMMIT = _loaded_commit()
+ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
 
 # ---- long texts -------------------------------------------------------------------------------------
@@ -62,7 +82,7 @@ app = FastAPI(title="Seter Guard")
 # The window tokenizer is a separate object from the pipeline's. The pipeline switches truncation on for
 # every call; using its tokenizer here without truncation would flip that setting back and forth between
 # requests, and the tokenizer raises "Already borrowed" when two threads do that at once.
-wtok = AutoTokenizer.from_pretrained(MODEL, revision=COMMIT or REVISION)
+wtok = AutoTokenizer.from_pretrained(MODEL, revision=COMMIT)
 
 
 def _model_limit():
@@ -73,25 +93,34 @@ def _model_limit():
     return limit - 2  # room for the two special tokens the pipeline adds to each window
 
 
+MIN_OVERLAP = 64
+
+
 def _settings():
     limit = _model_limit()
     # Default 510: the Seter models are trained and scored on windows of up to 512 tokens. The fast model can
     # take more in one call (set SETER_WINDOW_TOKENS up to its limit), but that is not what the scores measure.
     window = int(os.environ.get("SETER_WINDOW_TOKENS", min(510, limit)))
-    overlap = int(os.environ.get("SETER_OVERLAP_TOKENS", min(96, window // 4)))
-    max_tokens = int(os.environ.get("SETER_MAX_TOKENS", "50000"))
+    overlap = int(os.environ.get("SETER_OVERLAP_TOKENS", min(96, window // 2)))
+    max_tokens = int(os.environ.get("SETER_MAX_TOKENS", "16000"))
     batch = int(os.environ.get("SETER_BATCH_SIZE", "4"))
-    if not 32 <= window <= limit:
-        raise ValueError(f"SETER_WINDOW_TOKENS={window} must be between 32 and {limit}, the most {MODEL} reads in one call; "
+    if not 2 * MIN_OVERLAP <= window <= limit:
+        raise ValueError(f"SETER_WINDOW_TOKENS={window} must be between {2 * MIN_OVERLAP} and {limit}, the most {MODEL} reads in one call; "
                          "a larger window would be cut short by the model and text would go through unread")
-    if not 8 <= overlap <= window // 2:
-        raise ValueError(f"SETER_OVERLAP_TOKENS={overlap} must be between 8 and {window // 2} (half the window)")
+    # An entity that starts right after a cut is taken from the previous window, which must therefore reach
+    # well past the cut: with fewer than 64 shared tokens a long address could be seen whole by neither window.
+    if not MIN_OVERLAP <= overlap <= window // 2:
+        raise ValueError(f"SETER_OVERLAP_TOKENS={overlap} must be between {MIN_OVERLAP} and {window // 2} (half the window)")
     if max_tokens < window or batch < 1:
         raise ValueError("SETER_MAX_TOKENS must be at least one window and SETER_BATCH_SIZE at least 1")
     return window, overlap, max_tokens, batch
 
 
 WINDOW, OVERLAP, MAX_TOKENS, BATCH = _settings()
+# One call on each tokenizer before any request thread exists. A tokenizer.json can carry a truncation setting
+# saved at training time; the first call replaces it, and two threads doing that at once raise "Already borrowed".
+wtok("warm up", add_special_tokens=False, return_offsets_mapping=True, verbose=False)
+ner("warm up")
 
 
 class TextTooLong(Exception):
@@ -109,9 +138,9 @@ def windows(text: str):
     furthest from a cut; when two windows disagree about an entity's type, the owner's answer is used.
     Short texts are one window that trusts and owns everything."""
     whole = [(0, len(text), 0, len(text), 0, len(text))]
-    if len(text) <= WINDOW:  # a token covers at least one character
-        return whole
-    offs = wtok(text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
+    # Always count tokens: one character can become several tokens (ligatures, unit symbols), so a text
+    # shorter than WINDOW characters can still be longer than WINDOW tokens.
+    offs = wtok(text, add_special_tokens=False, return_offsets_mapping=True, verbose=False)["offset_mapping"]
     n = len(offs)
     if n <= WINDOW:
         return whole
@@ -132,9 +161,9 @@ def windows(text: str):
         cuts.append((i, j))
         if j >= n:
             break
-        i = word_start_at_or_before(j - OVERLAP, i)  # always moves forward: OVERLAP <= WINDOW // 2
-        if i <= cuts[-1][0]:
-            i = j - OVERLAP if j - OVERLAP > cuts[-1][0] else j
+        nxt = word_start_at_or_before(j - OVERLAP, i)
+        assert nxt > i, "windows must advance"  # holds because j > i + WINDOW // 2 and OVERLAP <= WINDOW // 2
+        i = nxt
     out, margin = [], OVERLAP // 4
     for k, (i, j) in enumerate(cuts):
         first, last = k == 0, j >= n
@@ -150,6 +179,10 @@ def windows(text: str):
     return out
 
 
+def count_tokens(text: str):
+    return len(wtok(text, add_special_tokens=False, verbose=False)["input_ids"])
+
+
 def entities(text: str):
     """Model output for the whole text, with character offsets into `text` and an "owner" flag (see windows)."""
     wins = windows(text)
@@ -162,13 +195,16 @@ def entities(text: str):
             s, t = e["start"] + a, e["end"] + a
             while s < t and text[s].isspace():  # the pipeline may include the space before a word
                 s += 1
-            if s < t and trust_from <= s < trust_to:  # by where it starts: an entity that runs past trust_to is still whole here
+            # Dropped: what lies wholly in the untrusted strip after a cut (seen without its left context; the
+            # previous window has it), and what starts in the strip before the next cut. Kept: anything that
+            # reaches into the trusted zone, so a long entity that begins just after a cut is never lost.
+            if s < t and t > trust_from and s < trust_to:
                 out.append({**e, "start": s, "end": t, "owner": own_from <= s < own_to})
     return out
 
 
 def spans(text: str):
-    out = []
+    out = []  # [start, end, type, type_is_from_owner]
     for e in sorted(entities(text), key=lambda e: (e["start"], not e["owner"], -e["end"])):
         if e["score"] < MIN_SCORE:
             continue
@@ -177,16 +213,19 @@ def spans(text: str):
             a += 1
         if a >= b:
             continue
-        if out and a < out[-1][1]:
-            # the same stretch reported by two windows: mask the union (when in doubt, mask). The type is the
-            # one sorted first: the earlier start, and at the same start the window that owns the text
-            out[-1] = (out[-1][0], max(out[-1][1], b), out[-1][2])
+        last = out[-1] if out else None
+        if last and a < last[1]:
+            # the same stretch reported by two windows: mask the union (when in doubt, mask); the type comes from
+            # the window that owns the text, whichever of the two spans starts first
+            last[1] = max(last[1], b)
+            if e["owner"] and not last[3]:
+                last[2], last[3] = t, True
         # merge neighbours of the same type separated only by whitespace (e.g. أبو خالد)
-        elif out and out[-1][2] == t and text[out[-1][1]:a].strip() == "":
-            out[-1] = (out[-1][0], b, t)
+        elif last and last[2] == t and text[last[1]:a].strip() == "":
+            last[1] = b
         else:
-            out.append((a, b, t))
-    return out
+            out.append([a, b, t, e["owner"]])
+    return [(a, b, t) for a, b, t, _ in out]
 
 
 def mask(text: str):
@@ -221,12 +260,15 @@ class GuardIn(BaseModel):
 
 @app.post("/beta/litellm_basic_guardrail_api")
 def litellm_guardrail(body: GuardIn):
+    # Count first: the limit is for the request as a whole, and an over-long request is refused before any
+    # model time is spent. Blocked, not passed through.
+    total = sum(count_tokens(t) for t in body.texts)
+    if total > MAX_TOKENS:
+        return {"action": "BLOCKED", "blocked_reason": "Text too long to scan for personal data (Seter): "
+                                                      f"{total} tokens in this request; the limit is SETER_MAX_TOKENS={MAX_TOKENS}"}
     masked, hit = [], False
     for t in body.texts:
-        try:
-            m, found = mask(t)
-        except TextTooLong as e:  # a text too long to scan is blocked, not passed through
-            return {"action": "BLOCKED", "blocked_reason": f"Text too long to scan for personal data (Seter): {e}"}
+        m, found = mask(t)
         masked.append(m)
         hit = hit or bool(found)
     if not hit:
@@ -238,4 +280,6 @@ def litellm_guardrail(body: GuardIn):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL, "revision": REVISION or ("local" if os.path.exists(MODEL) else "main (not pinned)"), "commit": COMMIT}
+    # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
+    return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
+            "revision": REVISION, "commit": COMMIT}

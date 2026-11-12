@@ -34,5 +34,8 @@ jobs:
           import server
           text, found = server.mask('Call Dana Levi on 054-7812345')
           assert '054-7812345' not in text and 'Dana' not in text, text
-          assert server.REVISION == server.DEFAULT_MODEL.split('@')[1] and server.COMMIT, (server.REVISION, server.COMMIT)
+          import os
+          assert os.environ['SETER_MODEL'] == os.environ['SETER_BAKED_MODEL'] == server.DEFAULT_MODEL, os.environ['SETER_MODEL']
+          assert (server.MODEL, server.REVISION, server.IS_LOCAL) == server.parse_model(server.DEFAULT_MODEL)
+          assert server.COMMIT == server.DEFAULT_COMMIT, server.COMMIT
           print(text, '|', server.MODEL, server.REVISION, server.COMMIT)"
