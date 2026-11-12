@@ -40,7 +40,8 @@ def test_model_is_pinned_by_default_and_health_reports_what_was_loaded():
     assert h["ok"] and h["model"] == server.MODEL and "@" not in h["model"]
     if "SETER_MODEL" not in os.environ:                       # CI runs the default: the pinned fast model
         assert h["revision"] == server.DEFAULT_MODEL.split("@")[1]
-    assert h["commit"] is None or len(h["commit"]) == 40      # the commit actually loaded, not the name asked for
+    if not os.path.exists(server.MODEL):                      # the commit actually loaded, not the name asked for
+        assert h["commit"] and len(h["commit"]) == 40 and h["commit"] != h["revision"]
 
 
 def test_parse_model(tmp_path):

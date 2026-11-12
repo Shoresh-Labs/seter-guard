@@ -34,8 +34,24 @@ MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 
 ner = pipeline("token-classification", model=MODEL, revision=REVISION, aggregation_strategy="simple")
-# the commit that was actually loaded (None for a local folder); a tag or "main" can move, this cannot
-COMMIT = getattr(ner.model.config, "_commit_hash", None)
+
+
+def _loaded_commit():
+    """The Hub commit the weights came from (None for a local folder). A tag or "main" can move; this cannot."""
+    commit = getattr(ner.model.config, "_commit_hash", None)  # not set by every transformers release
+    if commit or os.path.exists(MODEL):
+        return commit
+    try:  # the cache path of a file just loaded is .../snapshots/<commit>/config.json; works offline
+        from huggingface_hub import try_to_load_from_cache
+        path = try_to_load_from_cache(MODEL, "config.json", revision=REVISION)
+        if isinstance(path, str) and "/snapshots/" in path:
+            return path.split("/snapshots/")[1].split("/")[0]
+    except Exception:  # noqa: BLE001 - reporting only; never stop the server for this
+        pass
+    return None
+
+
+COMMIT = _loaded_commit()
 app = FastAPI(title="Seter Guard")
 
 # ---- long texts -------------------------------------------------------------------------------------
