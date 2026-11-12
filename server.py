@@ -8,13 +8,16 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import pipeline
 
-MODEL = os.environ.get("SETER_MODEL", "shoresh-labs/seter-pii-he-ar-fast")
+# SETER_MODEL is a Hub repo, optionally pinned to a version: "repo@v1.1". Without "@" the newest
+# published weights are used, which can change under you when a new version is released.
+MODEL, _, REVISION = os.environ.get("SETER_MODEL", "shoresh-labs/seter-pii-he-ar-fast").partition("@")
+REVISION = REVISION or None
 TAGS = {"private_person": "PERSON", "private_address": "ADDRESS", "private_phone": "PHONE",
         "private_email": "EMAIL", "account_number": "ID"}
 MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 
-ner = pipeline("token-classification", model=MODEL, aggregation_strategy="simple")
+ner = pipeline("token-classification", model=MODEL, revision=REVISION, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
 
 # The pipeline reads one window of text per call and silently drops whatever is past the model's limit
@@ -112,4 +115,4 @@ def litellm_guardrail(body: GuardIn):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    return {"ok": True, "model": MODEL, "revision": REVISION or "main"}

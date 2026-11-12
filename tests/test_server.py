@@ -28,6 +28,12 @@ def test_litellm_guardrail_contract():
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": ["nothing here"]}).json() == {"action": "NONE"}
 
 
+def test_health_reports_model_and_version():
+    h = c.get("/health").json()
+    assert h["ok"] and h["model"] == server.MODEL and "@" not in h["model"]
+    assert h["revision"] == (server.REVISION or "main")
+
+
 FILLER = "The quarterly report covers logistics, storage and delivery schedules for the northern region. "
 
 
