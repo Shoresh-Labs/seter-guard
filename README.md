@@ -39,7 +39,28 @@ guardrails:
       api_base: http://localhost:8080
 ```
 
-`SETER_ACTION=block` blocks requests containing personal data instead of masking them. `SETER_MODEL=shoresh-labs/seter-pii-he-ar` uses the larger, more accurate **v1.1** model. The default image still loads `seter-pii-he-ar-fast`, which is the **v1.0** (25 Oct 2026) fast checkpoint.
+`SETER_ACTION=block` blocks requests containing personal data instead of masking them.
+
+## Choosing and pinning the model
+
+`SETER_MODEL` is a Hugging Face repo followed by `@` and a version, or a local folder:
+
+| `SETER_MODEL` | What you get |
+|---|---|
+| `shoresh-labs/seter-pii-he-ar-fast@v1.1` | the fast model, pinned. This is the default, with or without Docker. |
+| `shoresh-labs/seter-pii-he-ar@v1.2` | the larger, more accurate model, pinned (about 2.3× slower on CPU) |
+| a repo without `@version` | whatever is newest in that repo; it changes when a new version is published |
+| a local folder | the model in that folder |
+
+`repo@` with nothing after it is refused, so a template with an unset version cannot quietly load the newest weights. The version is resolved to a commit once at start and everything is loaded by that commit. For the default, the server also checks that `v1.1` still points to the commit it did when this release was made, and refuses to start if the tag was moved. `GET /health` reports `model`, `source` (`hub` or `local`), `pinned`, the `revision` asked for and the `commit` actually loaded.
+
+With Docker the model is downloaded when the image is built, and the container never contacts the Hub afterwards (`HF_HUB_OFFLINE=1`), so a running image cannot change model. To build with another model:
+
+```bash
+docker build --build-arg SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 -t seter-guard .
+```
+
+The image can load only the exact `SETER_MODEL` it was built with. Setting another value at `docker run` fails at start with a message saying so; this includes the same repo without its `@version`, which means "newest" and needs the Hub. Rebuild, or add `-e HF_HUB_OFFLINE=0` to let the container download. Without Docker: `SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 uvicorn server:app`.
 
 ## Long texts
 
@@ -54,12 +75,18 @@ A model reads a limited number of tokens per call (512 for the large model, abou
 
 Texts that fit in one window take a single model call, as before.
 
-## Accuracy (REDACT benchmark, char-level F1)
+## Accuracy
 
-| | OpenAI privacy-filter | Seter v1.1 large, mean of 3 seeds (released) | Seter Fast (v1.0) |
+Character-level F1 on the Hebrew, Arabic and English records of the REDACT benchmark:
+
+| | OpenAI privacy-filter | Seter large v1.2, mean of 3 training seeds (released weights) | Seter Fast v1.1, mean of 3 training seeds (released weights) |
 |---|---|---|---|
-| Hebrew | 0.63 | 0.900 (0.904) | 0.84 |
-| Arabic | 0.72 | 0.912 (0.917) | 0.88 |
-| English | 0.70 | 0.871 (0.878) | 0.83 |
+| Hebrew | 0.642 | 0.915 (0.914) | 0.905 (0.908) |
+| Arabic | 0.735 | 0.922 (0.925) | 0.913 (0.914) |
+| English | 0.709 | 0.890 (0.890) | 0.885 (0.886) |
 
-A redaction aid, not an anonymization guarantee. MIT licensed. Numbers and caveats: [seter-pii-he-ar model card](https://huggingface.co/shoresh-labs/seter-pii-he-ar).
+On 150 held-out documents written for evaluation (support tickets, chats, emails, forms), released weights: large v1.2 F1 0.968 (precision 0.962, recall 0.975); Fast v1.1 F1 0.947 (precision 0.916, recall 0.980).
+
+These figures were measured with the models' own post-processing; this server uses the plain pipeline output, which can differ slightly. Earlier versions of this table (0.63 / 0.72 / 0.70 for OpenAI privacy-filter, 0.84 / 0.88 / 0.83 for Fast v1.0) were computed with a scoring bug that understated every system by 0.01-0.02.
+
+A redaction aid, not an anonymization guarantee. MIT licensed. Numbers and caveats: [seter-pii-he-ar](https://huggingface.co/shoresh-labs/seter-pii-he-ar) and [seter-pii-he-ar-fast](https://huggingface.co/shoresh-labs/seter-pii-he-ar-fast) model cards.
