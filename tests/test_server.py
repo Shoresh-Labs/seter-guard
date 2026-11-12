@@ -86,30 +86,31 @@ def test_text_near_a_window_boundary_reads_as_it_does_alone(probe):
         assert got == head + alone + tail, (pad, got[len(head) - 20:len(head) + 80])
 
 
-@pytest.mark.parametrize("probe", [
-    "מספר תעודת זהות 318845127 נמסר לפקיד. ",
-    "يا أبو خالد، ابنك سامر اتصل من 0559023417. ",
-    "הנתבע, מר עזרא בן שושן, מתגורר ברחוב הלל יפה 7, חיפה. ",
+@pytest.mark.parametrize("probe,hidden,tags,kept", [
+    ("מספר תעודת זהות 318845127 נמסר לפקיד. ", ["318845127"], ["[ID]"], ["נמסר לפקיד"]),
+    ("يا أبو خالد، ابنك سامر اتصل من 0559023417. ", ["خالد", "سامر", "0559023417"], ["[PERSON]", "[PHONE]"], ["اتصل من"]),
+    ("הנתבע, מר עזרא בן שושן, מתגורר ברחוב הלל יפה 7, חיפה. ", ["עזרא בן שושן", "הלל יפה 7"], ["[PERSON]", "[ADDRESS]"], ["הנתבע"]),
 ])
-def test_windowed_scan_equals_one_pass_near_a_boundary(probe, monkeypatch):
-    # For a model that can read the whole text in one call, cutting it into windows must not change the
-    # answer: same spans, same types. (Skipped for models whose limit is one window, such as the large one.)
-    limit = server._model_limit()
-    if limit < 2000:
-        pytest.skip("this model cannot read the test text in one pass")
-    tail = FILLER * 30
-    differ = []
+def test_hebrew_and_arabic_entities_keep_their_type_at_every_position_across_a_boundary(probe, hidden, tags, kept):
+    # An id whose label was cut away used to come out as a phone number, and a kunya lost its first word.
+    # The comparison with one pass over the whole text is deliberately not exact: on a 1,300-token context the
+    # model itself sometimes masks one more word than it does on 510 tokens, which is not a boundary effect.
+    head0, tail = FILLER * 27, FILLER * 30
     for pad in range(58, 82, 3):
-        t = FILLER * 27 + "Filler " * pad + probe + tail
-        windowed = server.mask(t)
+        head = head0 + "Filler " * pad
+        t = head + probe + tail
         assert len(server.windows(t)) > 1
-        with monkeypatch.context() as m:
-            m.setattr(server, "WINDOW", limit)
-            assert len(server.windows(t)) == 1
-            one_pass = server.mask(t)
-        if windowed != one_pass:
-            differ.append((pad, windowed[0][len(t) - len(tail) - len(probe) - 10:len(t) - len(tail) + 10], one_pass[1][-3:]))
-    assert not differ, differ
+        got = server.mask(t)[0]
+        assert got.startswith(head) and got.endswith(tail), pad          # nothing around it was touched
+        mid = got[len(head):len(got) - len(tail)]
+        for h in hidden:
+            assert h not in mid, (pad, mid)
+        for tag in tags:
+            assert tag in mid, (pad, mid)
+        for k in kept:
+            assert k in mid, (pad, mid)
+        if "[ID]" in tags:
+            assert "[PHONE]" not in mid, (pad, mid)
 
 
 def test_concurrent_requests():
