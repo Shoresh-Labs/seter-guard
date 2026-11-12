@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -29,6 +30,55 @@ def test_litellm_guardrail_contract():
     assert r["action"] == "GUARDRAIL_INTERVENED"
     assert len(r["texts"]) == 2 and r["texts"][1] == "no pii"
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": ["nothing here"]}).json() == {"action": "NONE"}
+
+
+# ---- model choice ----
+
+def test_default_is_pinned_and_health_reports_what_was_loaded():
+    model, revision, is_local = server.parse_model(server.DEFAULT_MODEL)
+    assert revision and not is_local and len(server.DEFAULT_COMMIT) == 40
+    h = c.get("/health").json()
+    assert h["ok"] and h["model"] == server.MODEL and h["revision"] == server.REVISION and h["pinned"] == bool(server.REVISION)
+    assert h["source"] == ("local" if server.IS_LOCAL else "hub")
+    if server.IS_LOCAL:
+        assert h["commit"] is None
+    else:
+        assert len(h["commit"]) == 40                           # the commit actually loaded, not the name asked for
+    if "SETER_MODEL" not in os.environ:                         # CI runs the default: the pinned fast model
+        assert (h["model"], h["revision"], h["commit"]) == (model, revision, server.DEFAULT_COMMIT)
+
+
+def test_parse_model(tmp_path, monkeypatch):
+    assert server.parse_model("org/repo@v1.2") == ("org/repo", "v1.2", False)
+    assert server.parse_model("org/repo") == ("org/repo", None, False)
+    assert server.parse_model(" org/repo@abc123 ") == ("org/repo", "abc123", False)
+    local = tmp_path / "GoogleDrive-me@example.com" / "model"    # a folder whose path contains "@"
+    local.mkdir(parents=True)
+    assert server.parse_model(str(local)) == (str(local), None, True)
+    for bad in ("org/repo@", "@v1.1", "", "   ",                 # an empty version must not silently mean "newest"
+                str(tmp_path / "missing@example.com" / "model"),  # a folder that is not there is not a Hub repo
+                "~/models/seter", "a/b/c"):
+        with pytest.raises(ValueError):
+            server.parse_model(bad)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "org" / "repo").mkdir(parents=True)              # a folder named like the repo would override the pin
+    with pytest.raises(ValueError, match="in place of the Hub repo"):
+        server.parse_model("org/repo@v1.2")
+    assert server.parse_model("./org/repo") == ("./org/repo", None, True)
+
+
+def test_a_moved_tag_or_an_unavailable_model_stops_the_server_with_a_useful_message(monkeypatch):
+    assert server.resolve_commit("anything", None, True) is None
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("SETER_BAKED_MODEL", "org/baked@v9")
+    import huggingface_hub
+    def boom(*a, **k):
+        raise OSError("not in the cache")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
+    with pytest.raises(RuntimeError) as e:
+        server.resolve_commit("org/other", None, False)
+    msg = str(e.value)
+    assert "offline" in msg and "org/baked@v9" in msg and "--build-arg" in msg and "main (not pinned)" in msg
 
 
 # ---- long texts ----

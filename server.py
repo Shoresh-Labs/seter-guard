@@ -3,18 +3,75 @@
 Implements LiteLLM's Generic Guardrail API (POST /beta/litellm_basic_guardrail_api)
 plus a plain /v1/redact endpoint. Runs fully on your own machine: no text leaves it.
 """
-import bisect, os
+import bisect, os, re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
 
-MODEL = os.environ.get("SETER_MODEL", "shoresh-labs/seter-pii-he-ar-fast")
+DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1"
+# The commit that tag pointed to when this line was written. A tag can be moved on the Hub; if v1.1 ever
+# resolves to anything else the server refuses to start instead of running weights nobody chose.
+DEFAULT_COMMIT = "2744c393718de9a911d9db3478341984a99a7cdb"
+_REPO_ID = re.compile(r"^[\w.-]+(/[\w.-]+)?$")
+
+
+def parse_model(value: str):
+    """SETER_MODEL -> (model, revision, is_local).
+
+    An existing folder is used as it is, whatever characters its path contains. Otherwise the value is a Hub
+    repo, `org/name@version` (a tag, branch or commit) or `org/name` alone, which means the newest weights
+    and changes when a new version is published."""
+    value = value.strip()
+    if not value:
+        raise ValueError("SETER_MODEL is empty")
+    if os.path.isdir(value):
+        return value, None, True
+    repo, sep, revision = value.rpartition("@") if "@" in value else (value, "", "")
+    if not _REPO_ID.match(repo):
+        raise ValueError(f"SETER_MODEL={value!r} is neither an existing folder nor a Hub repo (org/name or org/name@version)")
+    if sep and not revision:
+        raise ValueError(f"SETER_MODEL={value!r}: nothing after '@' (for example {DEFAULT_MODEL}); "
+                         "an empty version would silently load the newest weights")
+    if os.path.isdir(repo):  # transformers prefers a local folder of that name and would ignore the version
+        raise ValueError(f"a folder named {repo!r} exists in the working directory and would be loaded in place of the "
+                         f"Hub repo, ignoring the version. Use its path (./{repo}) to load it, or start from another directory")
+    return repo, revision or None, False
+
+
+def resolve_commit(model, revision, is_local):
+    """The Hub commit behind `revision`, looked up once. Everything is then loaded by that commit, so the
+    pipeline, the window tokenizer and /health cannot disagree, and a tag that moves later changes nothing."""
+    if is_local:
+        return None
+    from huggingface_hub import hf_hub_download
+    try:
+        path = hf_hub_download(model, "config.json", revision=revision)
+    except Exception as e:  # noqa: BLE001 - re-raised with what the operator needs to know
+        hint = ""
+        if os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes", "on"):
+            baked = os.environ.get("SETER_BAKED_MODEL")
+            hint = (" This process is offline (HF_HUB_OFFLINE=1) and can only load what is already downloaded"
+                    + (f": this image was built with SETER_MODEL={baked}" if baked else "")
+                    + ". Use that exact value (the version after '@' included), rebuild the image with "
+                      "--build-arg SETER_MODEL=..., or set HF_HUB_OFFLINE=0 to allow a download.")
+        raise RuntimeError(f"cannot load {model} at version {revision or 'main (not pinned)'}: {type(e).__name__}.{hint}") from e
+    m = re.search(r"snapshots[/\\]([0-9a-f]{40})[/\\]", path)
+    if not m:
+        raise RuntimeError(f"cannot tell which commit of {model} was resolved (cache path {path!r})")
+    return m.group(1)
+
+
+MODEL, REVISION, IS_LOCAL = parse_model(os.environ.get("SETER_MODEL", DEFAULT_MODEL))
+COMMIT = resolve_commit(MODEL, REVISION, IS_LOCAL)
+if (MODEL, REVISION) == parse_model(DEFAULT_MODEL)[:2] and COMMIT != DEFAULT_COMMIT:
+    raise RuntimeError(f"{DEFAULT_MODEL} now resolves to commit {COMMIT}, not {DEFAULT_COMMIT}: the tag was moved. "
+                       f"Pin SETER_MODEL to a commit you trust (repo@<commit>) to start anyway")
 TAGS = {"private_person": "PERSON", "private_address": "ADDRESS", "private_phone": "PHONE",
         "private_email": "EMAIL", "account_number": "ID"}
 MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 
-ner = pipeline("token-classification", model=MODEL, aggregation_strategy="simple")
+ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
 
 # ---- long texts -------------------------------------------------------------------------------------
@@ -25,7 +82,7 @@ app = FastAPI(title="Seter Guard")
 # The window tokenizer is a separate object from the pipeline's. The pipeline switches truncation on for
 # every call; using its tokenizer here without truncation would flip that setting back and forth between
 # requests, and the tokenizer raises "Already borrowed" when two threads do that at once.
-wtok = AutoTokenizer.from_pretrained(MODEL)
+wtok = AutoTokenizer.from_pretrained(MODEL, revision=COMMIT)
 
 
 def _model_limit():
@@ -223,4 +280,6 @@ def litellm_guardrail(body: GuardIn):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
+    return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
+            "revision": REVISION, "commit": COMMIT}
