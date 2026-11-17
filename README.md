@@ -77,25 +77,25 @@ Texts that fit in one window take a single model call, as before.
 
 ## Israeli identity numbers (optional check)
 
-An Israeli identity number (Teudat Zehut) is nine digits, and the last one is a check digit. The model cannot verify it, and its id class covers identity, passport, licence and bank account numbers alike, so a nine-digit court or office file number is masked as one of them. With `SETER_IL_ID_CHECK=1` such a number is left in the text when all of these hold:
+An Israeli identity number (Teudat Zehut) is nine digits, and the last one is a check digit. The model cannot verify it, and its id class covers identity, passport, licence and bank account numbers alike, so a nine-digit enforcement or proceeding number is masked as one of them. With `SETER_IL_ID_CHECK=1` such a number is left in the text when all of these hold:
 
-- the model labelled it as an id, and in a long text no window labelled it as anything else, at any confidence;
+- the model labelled it as an id, and in a long text no window labelled it as anything else;
 - it is exactly nine digits standing alone, not part of a longer number or code;
 - its check digit is wrong;
-- the words directly before it name a case or proceeding number: `תיק`, `הליך` or `אסמכתא` (also with an attached ב, ל, ה, מ, ש, and `תיק הוצאה לפועל`), optionally followed by `מספר` or `מס'`; in English `case`, `file`, `docket`, `ref` or `reference` followed by `no.`, `number`, `#` or `:`;
-- nothing around it names an identity, passport, licence or account number, or a person's own record (medical, employee, customer, tax): not between the previous number on the line and this one, and not in the rest of its clause.
+- the words directly before it are `תיק הוצאה לפועל` (or `תיק הוצל"פ`), `הליך` or `אסמכתא`, alone or with an attached ב, ל, ה, מ, ש, optionally followed by `מספר` or `מס'`;
+- nothing before it on the line says whose record it is (a patient, an employee, a customer), and nothing near it, before or after, names an identity, passport, licence or account number.
 
 | Text | With the check on |
 |---|---|
 | `תיק הוצאה לפועל מספר 034851272 נפתח בלשכת חיפה.` | left as it is |
-| `מספר הליך 034851272, ת.ז. של החייב 034851279.` | file number left, identity number masked |
+| `מספר הליך 034851272, ת.ז. של החייב 034851279.` | proceeding number left, identity number masked |
 | `ת.ז. 034851272`, `מספר דרכון 034851272`, `SSN 123456789`, a bare `034851272` | masked |
-| `תיק רפואי מספר 034851272`, `תיק 034851272 (ת.ז. של החייב)`, `אזרח ותיק, מספרו 034851272` | masked |
-| `In case you need it, my social is 123456789` | masked |
+| `בתיק 034851272`, `תיק רפואי מספר 034851272`, `Case no. 034851272`, `Tax file number 123456789` | masked |
+| `מספר הליך 034851272 (ת.ז. של החייב)`, `החולה דני לוי, מספר הליך 034851272` | masked |
 
-A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check.
+The rule is narrow on purpose. A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check. A bare `תיק` is not enough either, because a medical, tax or population-registry file is numbered by the person's identity number, and English `case`, `file` and `reference` are ordinary words, so no English phrase releases a number.
 
-It is off by default. The rule is a set of word lists (`REFERENCE_BEFORE` and `IDENTITY_CUE` in `server.py`), not understanding. A file number described in other words stays masked. A personal number that the text introduces only as a case number, with no identity word near it, would be released. `GET /health` reports `il_id_check`, and `/v1/redact` lists every number left in the text this way under `kept`.
+It is off by default. The rule is word lists (`REFERENCE_BEFORE`, `IDENTITY_CUE` and `PERSON_RECORD` in `server.py`), not understanding: an enforcement number described in other words stays masked, and a personal number that the text introduces only as a proceeding number, with none of the listed words near it, would be released. `GET /health` reports `il_id_check`. Every number left in the text this way is listed under `kept` by `/v1/redact` and written to the log (logger `seter_guard`: type and position, never the digits) on both endpoints.
 
 ## Accuracy
 

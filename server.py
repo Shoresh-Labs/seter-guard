@@ -3,7 +3,7 @@
 Implements LiteLLM's Generic Guardrail API (POST /beta/litellm_basic_guardrail_api)
 plus a plain /v1/redact endpoint. Runs fully on your own machine: no text leaves it.
 """
-import bisect, os, re
+import bisect, logging, os, re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
@@ -85,42 +85,53 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 # ---- Israeli identity numbers ------------------------------------------------------------------------
 # An Israeli identity number (Teudat Zehut) is nine digits whose last digit is a check digit. The model
 # cannot do that arithmetic, and its account_number class ("ID" here) covers identity, passport, licence
-# and bank account numbers alike, so a nine-digit court or office file number is masked as one of them.
+# and bank account numbers alike, so a nine-digit enforcement or proceeding number is masked as one of them.
 #
 # With SETER_IL_ID_CHECK=1 such a number is left in the text, but only when all of this holds:
-#   - the model labelled it ID, and no window called it anything else, at any confidence;
+#   - the model labelled it ID, and no window called it anything else, at any confidence, trusted or not;
 #   - it is exactly nine ASCII digits standing alone, not a piece of a longer number or code;
 #   - the check digit is wrong, so it is not a correctly written Israeli identity number;
-#   - the words directly before it name a case or proceeding number (REFERENCE_BEFORE): "תיק הוצאה לפועל
-#     מספר", "בהליך", "case no.", with nothing else between those words and the number;
-#   - and nothing around it names an identity, passport, licence or account number, or a person's own
-#     record (IDENTITY_CUE): not between the previous number on the line and this one, and not in the
-#     rest of its clause.
-# The last two matter because a wrong check digit does not make a number harmless. The first eight digits
-# of an identity number determine the ninth, so an identity number with a mistyped or misread last digit
-# still discloses the real one, and US social security numbers, many passport numbers and bank account
-# numbers are nine digits that fail the check nine times in ten. A reference word somewhere nearby is not
-# enough either: "in case you need it", "אזרח ותיק", "תיק רפואי" are not case numbers.
+#   - the words directly before it are one of three Hebrew phrases (REFERENCE_BEFORE): "תיק הוצאה לפועל",
+#     "הליך" or "אסמכתא", optionally followed by "מספר", with nothing else between them and the number;
+#   - nothing on the line before it says whose record this is (PERSON_RECORD: a patient, an employee, a
+#     customer), and nothing names an identity, passport, licence or account number (IDENTITY_CUE) between
+#     the previous number on the line and this one;
+#   - and neither kind of word follows it: to the end of the line, or, when another number follows, to the
+#     end of the clause (a label after that belongs to the other number).
+# The narrowness is deliberate. A wrong check digit does not make a number harmless: the first eight digits
+# of an identity number determine the ninth, so one with a mistyped or misread last digit still discloses
+# the real one, and US social security numbers, many passport numbers and bank account numbers are nine
+# digits that fail the check nine times in ten. Wider rules were tried and each leaked: a bare "תיק" is also
+# a medical, tax or population-registry file whose number is the person's identity number, and English
+# "case", "file" and "reference" are ordinary words ("the number we have on file: ...", "tax file number").
 #
 # Off by default: these are word lists, not understanding, and a guardrail that is unsure masks.
 IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
 _HE = "א-ת"
-# Hebrew: תיק / הליך / אסמכתא as whole words, alone or after the attached prefixes ב ל ה מ ש (and ו before
-# one of those; a bare ו would make "ותיק", a veteran). תיק may be followed by "הוצאה לפועל" only: a medical,
-# personal or tax file is a person's record, not a case. English needs an explicit number marker, because
-# "case" and "file" are ordinary words. Arabic has no reference words here (ملف is usually a personal file).
+_HE_PREFIX = "(?:ו?[בלהמשכ]{1,2})?"   # attached ב ל ה מ ש כ, also after ו; a bare ו is left out ("ותיק" is a veteran)
+_QUOTE = "[\"״”'׳.]"                  # the mark inside a Hebrew abbreviation: ת"ז, ת.ז, ת׳ז
+# Bounded repeats only, and matched against the last REFERENCE_TAIL characters before the number: an open
+# "\s*" here backtracked for seconds on a long run of spaces.
+REFERENCE_TAIL = 80
 REFERENCE_BEFORE = re.compile(
-    rf"(?:(?<![{_HE}])(?:ו?[בלהמש]{{1,2}})?(?:תיק(?:\s+ה?(?:הוצאה\s+לפועל|הוצל[\"״”]פ))?|הליך|אסמכתא)"
-    rf"(?:\s+(?:מספר|מס['׳.]?))?\s*:?"
-    r"|(?<![a-z_])(?:case|file|docket|reference|ref)\s*(?:(?:no|num|number)\b\.?\s*:?|#|:))"
-    r"\s*#?\s*$", re.IGNORECASE)
+    rf"(?<![{_HE}]){_HE_PREFIX}(?:תיק\s{{1,2}}ה?(?:הוצאה\s{{1,2}}לפועל|הוצל[\"״”]פ)|הליך|אסמכתא)"
+    rf"(?:\s{{1,2}}(?:מספר|מס['׳.]?))?\s{{0,2}}:?\s{{0,2}}$")
 IDENTITY_CUE = re.compile(
-    rf"ת[\"״”'׳.]\s?ז|(?<![{_HE}])תז(?![{_HE}])|זהות|זיהוי|מזהה|דרכו[ןנ]|ר?י?שיו[ןנ]|חשבו[ןנ]|ח-ן|עוסק|ביטוח\s+לאומי|מספר\s+אישי"
-    r"|רפואי|מטופל|עובד|לקוח|מס\s+הכנסה|هوي[ةه]|جواز|رخصة|حساب|مريض"
-    r"|(?<![a-z])(?:ids?|i\.d|ssn|ss#|social|passport|licen[cs]e|account|acct|iban|identity|national|mrn|patient|employee"
-    r"|customer|member|user|passenger|personal)(?![a-z])", re.IGNORECASE)
+    rf"ת{_QUOTE}\s*ז|מ{_QUOTE}\s*[זא]|ח{_QUOTE}\s*[ןנ]|(?<![{_HE}])תז(?![{_HE}])|זהות|זיהוי|מזהה|דרכו[ןנ]|רי?שיו[ןנ]"
+    rf"|חשבו(?:ן|נו|נה|נם|נות)(?![{_HE}])|ח-ן|עוסק\s+(?:מורשה|פטור)|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים"
+    r"|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخصة|حساب"
+    r"|(?<![a-z])(?:ids?|i\.d|ssn|ss#|social|passport|licen[cs]e|account|acct|iban|identity|national|mrn|tax|medical|insurance"
+    r"|immigration|personnel|personal)(?![a-z])", re.IGNORECASE)
+PERSON_RECORD = re.compile(
+    rf"(?<![{_HE}]){_HE_PREFIX}(?:מטופל(?:ת|ים)?|חולה|עובד(?:ת|ים)?|לקוח(?:ה|ות)?|תלמיד(?:ה|ים)?|סטודנט(?:ית|ים)?)(?![{_HE}])|مريض|موظف"
+    r"|(?<![a-z])(?:patient|employee|customer|passenger|student|taxpayer|member|user)(?![a-z])", re.IGNORECASE)
 _LONG_NUMBER = re.compile(r"\d[\d-]{3,}\d")           # five characters or more: another number on the line
 _CLAUSE_END = re.compile(r"[,;]|[.!?](?=\s|$)")
+log = logging.getLogger("seter_guard")
+if not log.handlers:  # uvicorn configures only its own loggers; without this the audit lines would go nowhere
+    log.addHandler(logging.StreamHandler())
+    log.setLevel(logging.INFO)
+    log.propagate = False
 
 
 def il_id_check(number: str):
@@ -137,32 +148,38 @@ def il_id_check(number: str):
 def _stands_alone(text: str, a: int, b: int):
     """The digits at text[a:b] are a whole number, not a piece of a longer number or code.
 
-    A letter or digit touching it makes it a piece (A034851272), and so does any other character that is not
-    whitespace when a digit sits on its far side (12-034851272, 034851272/21, 034851272\\21, 034851272:5)."""
+    A letter or digit touching it makes it a piece (A034851272). So does a space with a digit beyond it
+    (034851272 21, a number written in groups), and any other character with a letter or digit beyond it
+    (12-034851272, 034851272/21, 034851272\\21, 034851272-A)."""
     for near, far in ((text[a - 1:a], text[a - 2:a - 1]), (text[b:b + 1], text[b + 1:b + 2])):
-        if near and not near.isspace() and (near.isalnum() or far.isdigit()):
+        if not near:
+            continue
+        if near.isalnum() or (far.isdigit() if near.isspace() else far.isalnum()):
             return False
     return True
 
 
 def _called_a_reference(text: str, a: int, b: int):
-    """The words directly before text[a:b] name a case or proceeding number, and nothing around it names an
-    identity, passport, licence or account number or a person's own record."""
+    """The words directly before text[a:b] name an enforcement or proceeding number, and nothing around it
+    says whose record it is or names an identity, passport, licence or account number."""
     line_start = text.rfind("\n", 0, a) + 1
     line_end = text.find("\n", b)
     before, after = text[line_start:a], text[b:len(text) if line_end < 0 else line_end]
-    if not REFERENCE_BEFORE.search(before):
+    if not REFERENCE_BEFORE.search(before[-REFERENCE_TAIL:]):
         return False
-    # Words before an earlier number on the line describe that number; everything after it describes this one.
+    # Whose record it is holds for the whole line. A label such as ת.ז. describes the number that follows it,
+    # so a label before an earlier number on the line is about that number, not this one.
     earlier = [m.end() for m in _LONG_NUMBER.finditer(before)]
-    if IDENTITY_CUE.search(before[earlier[-1] if earlier else 0:]):
+    if PERSON_RECORD.search(before) or IDENTITY_CUE.search(before[earlier[-1] if earlier else 0:]):
         return False
-    # A label can follow the number: "תיק 034851272 (ת.ז. של החייב)". Read to the end of the clause or to the
-    # next number, whichever comes first; a label after that belongs to something else.
+    # A label can follow the number: "מספר הליך 034851272 (ת.ז. של החייב)", "... 034851272, שהוא מספר הזהות".
+    # Read to the end of the line. Only when another number follows is the clause the limit: in
+    # "מספר הליך 034851272, ת.ז. של החייב 034851279" the label after the comma belongs to the second number.
     nxt = _LONG_NUMBER.search(after)
-    stop = nxt.start() if nxt else len(after)
-    clause = _CLAUSE_END.search(after, 0, stop)  # the full stops inside "ת.ז." are not followed by a space
-    return not IDENTITY_CUE.search(after[:clause.start() if clause else stop])
+    if nxt:
+        clause = _CLAUSE_END.search(after, 0, nxt.start())  # the full stops inside "ת.ז." are not followed by a space
+        after = after[:clause.start() if clause else nxt.start()]
+    return not (IDENTITY_CUE.search(after) or PERSON_RECORD.search(after))
 
 
 def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
@@ -300,15 +317,19 @@ def entities(text: str):
             # reaches into the trusted zone, so a long entity that begins just after a cut is never lost.
             if s < t and t > trust_from and s < trust_to:
                 out.append({**e, "start": s, "end": t, "owner": own_from <= s < own_to})
+            elif s < t:  # not used for masking, but kept as a second opinion (see scan)
+                out.append({**e, "start": s, "end": t, "owner": False, "untrusted": True})
     return out
 
 
 def scan(text: str):
     """(spans to mask, spans detected but left in the text), each a list of (start, end, type)."""
     out = []  # [start, end, type, type_is_from_owner, another_type_was_reported]
-    doubts = []  # (start, end, type) of what the model reported below MIN_SCORE: not masked, but not ignored either
+    # (start, end, type) of what a window reported below MIN_SCORE or right next to a cut: never masked on that
+    # evidence, but enough to stop a later check from releasing the span
+    doubts = []
     for e in sorted(entities(text), key=lambda e: (e["start"], not e["owner"], -e["end"])):
-        if e["score"] < MIN_SCORE:
+        if e["score"] < MIN_SCORE or e.get("untrusted"):
             doubts.append((e["start"], e["end"], TAGS.get(e["entity_group"], "PII")))
             continue
         a, b, t = e["start"], e["end"], TAGS.get(e["entity_group"], "PII")
@@ -337,6 +358,8 @@ def scan(text: str):
         # a weak second opinion counts too: if any window called part of this span something else, it stays masked
         mixed = mixed or any(x < b and a < y and u != t for x, y, u in doubts)
         (kept if releasable(text, a, b, t, mixed) else masked).append((a, b, t))
+    for a, b, t in kept:  # both endpoints pass through here; offsets only, never the digits
+        log.info("left unmasked by il_id_check: %s at characters %d-%d of a %d-character text", t, a, b, len(text))
     return masked, kept
 
 
