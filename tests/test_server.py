@@ -290,7 +290,9 @@ def _called(text, number=FILE_NO):
 @pytest.mark.parametrize("text", [
     FILE_TEXT, f"מספר הליך {FILE_NO}, ת.ז. של החייב {VALID_ID}.", f"ת.ז. של החייב {VALID_ID}, מספר הליך {FILE_NO}",
     f"בתיק הוצאה לפועל מס' {FILE_NO} נקבע", f"תיק הוצל\"פ {FILE_NO}", f"אסמכתא: {FILE_NO}", f"בהליך {FILE_NO} נדחתה הבקשה",
-    f"לאור העובדות שבתיק ההוצאה לפועל {FILE_NO}", f"חשבונית מס, אסמכתא {FILE_NO}",   # עובדות, חשבונית: not identity words
+    # עובדות / עובדה / עובדתי (fact) and חשבונית / חשבוניות (invoice) are not about a person or an account
+    f"לאור העובדות שבתיק ההוצאה לפועל {FILE_NO}", f"חשבונית מס, אסמכתא {FILE_NO}", f"עובדה היא שבהליך {FILE_NO}",
+    f"הבסיס העובדתי, הליך {FILE_NO}", f"שתי חשבוניות, אסמכתא {FILE_NO}",
 ])
 def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(text):
     assert _called(text)
@@ -322,6 +324,10 @@ SSN = "123456789"
     # whose record it is, anywhere before the number on the line, even with other numbers between
     f"מטופל דני לוי, נולד 01-02-1980, מספר הליך {FILE_NO}", f"מטופל דני לוי, טל' 054-1234567, אסמכתא {FILE_NO}", f"לקוח 0541234567 הליך {FILE_NO}",
     f"החולה דני לוי, מספר הליך {FILE_NO}", f"העובדת רות כהן, טל' 054-1234567, אסמכתא: {FILE_NO}",
+    # inflected forms of the words that say whose record or account it is
+    f"אחד מעובדיו, מספר הליך {FILE_NO}", f"לקוחותיה של החברה, אסמכתא {FILE_NO}", f"מטופלו של הרופא, מספר הליך {FILE_NO}",
+    f"העובדת רות, הליך {FILE_NO}", f"עובדי המשרד, אסמכתא {FILE_NO}", f"חשבונך בבנק, אסמכתא {FILE_NO}", f"מחשבוני הפרטי, אסמכתא {FILE_NO}",
+    f"חשבונותיו בבנק, אסמכתא {FILE_NO}", f"החולים במחלקה, מספר הליך {FILE_NO}", f"מספר הליך {FILE_NO} של לקוחנו",
     # named as an identity, passport, licence or account number, near or far, in any form
     f"SSN {FILE_NO}", f"ת.ז. {FILE_NO}", f"ת\"ז {FILE_NO}", f"file ID {FILE_NO}", f"מספר דרכון {FILE_NO}", f"case 12, I.D. {FILE_NO}",
     f"מספר תעודת הזהות של החייב שנגדו נפתח ההליך {FILE_NO}", f"מספר תעודת הזהות של החייב שנגדו נפתח בלשכת חיפה תיק הוצאה לפועל מספר {FILE_NO}",

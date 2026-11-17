@@ -118,12 +118,14 @@ REFERENCE_BEFORE = re.compile(
     rf"(?:\s{{1,2}}(?:מספר|מס['׳.]?))?\s{{0,2}}:?\s{{0,2}}$")
 IDENTITY_CUE = re.compile(
     rf"ת{_QUOTE}\s*ז|מ{_QUOTE}\s*[זא]|ח{_QUOTE}\s*[ןנ]|(?<![{_HE}])תז(?![{_HE}])|זהות|זיהוי|מזהה|דרכו[ןנ]|רי?שיו[ןנ]"
-    rf"|חשבו(?:ן|נו|נה|נם|נות)(?![{_HE}])|ח-ן|עוסק\s+(?:מורשה|פטור)|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים"
+    rf"|חשבו[ןנ](?!י(?:ת|ות)(?![{_HE}]))|ח-ן|עוסק\s+(?:מורשה|פטור)|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים"
     r"|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخصة|حساب"
     r"|(?<![a-z])(?:ids?|i\.d|ssn|ss#|social|passport|licen[cs]e|account|acct|iban|identity|national|mrn|tax|medical|insurance"
     r"|immigration|personnel|personal)(?![a-z])", re.IGNORECASE)
+# Stems, so that every inflected form counts (עובדיו, לקוחותיה, חשבונך, מטופלת). Only the look-alikes known to be
+# harmless are let through by name: חשבונית / חשבוניות (an invoice) above, עובדה / עובדות / עובדתי (a fact) here.
 PERSON_RECORD = re.compile(
-    rf"(?<![{_HE}]){_HE_PREFIX}(?:מטופל(?:ת|ים)?|חולה|עובד(?:ת|ים)?|לקוח(?:ה|ות)?|תלמיד(?:ה|ים)?|סטודנט(?:ית|ים)?)(?![{_HE}])|مريض|موظف"
+    rf"מטופל|חול(?:ה|ים|ת)|עובד(?!(?:ה|ות|תי(?:ת|ים|ות)?)(?![{_HE}]))|לקוח|תלמיד|סטודנט|مريض|موظف"
     r"|(?<![a-z])(?:patient|employee|customer|passenger|student|taxpayer|member|user)(?![a-z])", re.IGNORECASE)
 _LONG_NUMBER = re.compile(r"\d[\d-]{3,}\d")           # five characters or more: another number on the line
 _CLAUSE_END = re.compile(r"[,;]|[.!?](?=\s|$)")
