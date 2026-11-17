@@ -253,6 +253,12 @@ def test_settings_that_would_skip_text_are_rejected(monkeypatch):
 # ---- Israeli identity numbers ----
 
 VALID_ID, FILE_NO = "034851279", "034851272"   # the same eight digits with the right and a wrong check digit
+FILE_TEXT = f"תיק הוצאה לפועל מספר {FILE_NO} נפתח בלשכת חיפה."
+ID_TEXT = f"מספר תעודת הזהות שלו הוא {VALID_ID}."
+
+
+def redact(text):
+    return c.post("/v1/redact", json={"text": text}).json()
 
 
 def test_il_id_check_digit():
@@ -265,40 +271,73 @@ def test_il_id_check_digit():
 
 
 def test_stands_alone():
-    for text in (f"מספר {FILE_NO} נפתח", FILE_NO, f"ת.ז.{FILE_NO}.", f"({FILE_NO})", f"מ-{FILE_NO}, ועוד"):
+    for text in (f"מספר {FILE_NO} נפתח", FILE_NO, f"מספר {FILE_NO}.", f"({FILE_NO})", f"מספר: {FILE_NO}, ועוד", f"{FILE_NO}. 5 ימים"):
         a = text.index(FILE_NO)
         assert server._stands_alone(text, a, a + 9), text
-    for text in (f"12-{FILE_NO}", f"{FILE_NO}-55", f"A{FILE_NO}", f"{FILE_NO}/21", f"1{FILE_NO}", f"{FILE_NO}.5"):
+    for joined in (f"12-{FILE_NO}", f"{FILE_NO}-55", f"A{FILE_NO}", f"{FILE_NO}/21", f"1{FILE_NO}", f"{FILE_NO}.5", f"{FILE_NO}\\21",
+                   f"{FILE_NO}–21", f"{FILE_NO}־21", f"{FILE_NO}:21", f"+{FILE_NO}1", f"21,{FILE_NO}", f"{FILE_NO}_21", f"ב{FILE_NO}"):
+        text = f"מספר {joined} נפתח"
         a = text.index(FILE_NO)
         assert not server._stands_alone(text, a, a + 9), text
 
 
-FILE_TEXT = f"מספר תעודת הזהות שלו הוא {FILE_NO}."
-ID_TEXT = f"מספר תעודת הזהות שלו הוא {VALID_ID}."
+def test_only_a_number_called_a_reference_can_be_released():
+    def called(text):
+        return server._called_a_reference(text, text.index(FILE_NO))
+    for text in (FILE_TEXT, f"מספר הליך {FILE_NO}", f"בתיק {FILE_NO}", f"Case no. {FILE_NO}", f"file {FILE_NO}", f"ملف رقم {FILE_NO}"):
+        assert called(text), text
+    for text in (f"מספר {FILE_NO}", f"call {FILE_NO} now", f"SSN {FILE_NO}",                 # no cue at all
+                 f"ת.ז. {FILE_NO}", f"ת\"ז {FILE_NO}", f"מספר תעודת הזהות שלו הוא {FILE_NO}",   # called an identity number
+                 f"תיק 12, ת.ז. של החייב {FILE_NO}", f"בתיק זה, חשבון {FILE_NO}", f"case file, passport {FILE_NO}",
+                 f"file ID {FILE_NO}", f"מספר דרכון {FILE_NO}", f"רישיון נהיגה מספר {FILE_NO}",
+                 f"תיק פתוח\nמספר {FILE_NO}",                                                # the cue is on another line
+                 "תיק " + "מילה " * 12 + FILE_NO):                                           # the cue is too far back
+        assert not called(text), text
 
 
-def test_il_id_check_is_off_by_default():
-    assert server.IL_ID_CHECK is False or "SETER_IL_ID_CHECK" in os.environ
+def test_il_id_check_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("SETER_IL_ID_CHECK", raising=False)
+    assert server._flag("SETER_IL_ID_CHECK") is False
+    assert server.IL_ID_CHECK is False and c.get("/health").json()["il_id_check"] is False   # conftest clears the variable
     for text, number in ((FILE_TEXT, FILE_NO), (ID_TEXT, VALID_ID)):
-        assert number not in c.post("/v1/redact", json={"text": text}).json()["text"]
+        r = redact(text)
+        assert number not in r["text"] and r["kept"] == []
 
 
-def test_il_id_check_leaves_a_failing_nine_digit_number_and_masks_the_rest(monkeypatch):
+def test_il_id_check_releases_a_file_number_and_nothing_else(monkeypatch):
     monkeypatch.setattr(server, "IL_ID_CHECK", True)
-    r = c.post("/v1/redact", json={"text": FILE_TEXT}).json()
+    assert c.get("/health").json()["il_id_check"] is True
+    r = redact(FILE_TEXT)
+    a = FILE_TEXT.index(FILE_NO)
     assert r["text"] == FILE_TEXT and r["entities"] == []
-    r = c.post("/v1/redact", json={"text": ID_TEXT}).json()
-    assert VALID_ID not in r["text"] and "[ID]" in r["text"]
-    both = f"{FILE_TEXT} שמו רון אברהם, ומספר הזהות של אשתו {VALID_ID}."
-    r = c.post("/v1/redact", json={"text": both}).json()["text"]
-    assert FILE_NO in r and VALID_ID not in r and "רון" not in r
-    # not a single nine-digit number: masked whatever the digits are
-    for text in (f"מספר תעודת הזהות שלו {FILE_NO[:8]}-{FILE_NO[8]}", f"מספר חשבון הבנק שלו {FILE_NO}5"):
-        masked = c.post("/v1/redact", json={"text": text}).json()["text"]
-        assert FILE_NO[:8] not in masked, masked
+    assert r["kept"] == [{"type": "ID", "start": a, "end": a + 9, "reason": "il_id_check"}]   # reported, not silent
+    r = redact(ID_TEXT)
+    assert VALID_ID not in r["text"] and "[ID]" in r["text"] and r["kept"] == []
+    r = redact(f"מספר הליך {FILE_NO}, ת.ז. של החייב {VALID_ID}.")["text"]
+    assert FILE_NO in r and VALID_ID not in r
+    # a wrong check digit alone releases nothing: an identity number with a typo, a passport, a bank account,
+    # a US social security number, a number with no description, a piece of a longer code
+    for text in (f"ת.ז. {FILE_NO}", f"מספר תעודת הזהות שלו הוא {FILE_NO}.", f"מספר דרכון {FILE_NO}",
+                 f"בנק 12 סניף 345 חשבון {FILE_NO}", "SSN 123456789 on file for Dana Levi",
+                 f"מספר תעודת הזהות שלו {FILE_NO[:8]}-{FILE_NO[8]}", f"תיק הוצאה לפועל מספר {FILE_NO}\\21 נפתח"):
+        got = redact(text)
+        digits = "123456789" if "SSN" in text else FILE_NO[:8]
+        assert digits not in got["text"] and got["kept"] == [], got
     # the LiteLLM endpoint follows: nothing left to mask means no intervention
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [FILE_TEXT]}).json() == {"action": "NONE"}
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [ID_TEXT]}).json()["action"] == "GUARDRAIL_INTERVENED"
+
+
+def test_a_number_two_windows_disagree_about_is_not_released(monkeypatch):
+    monkeypatch.setattr(server, "IL_ID_CHECK", True)
+    text = f"case {FILE_NO} now"
+    def fake(kinds):
+        return lambda _t: [{"start": 5, "end": 14, "entity_group": k, "score": 0.9, "owner": o} for k, o in kinds]
+    monkeypatch.setattr(server, "entities", fake([("account_number", True)]))
+    assert server.scan(text) == ([], [(5, 14, "ID")])                          # one opinion: released
+    for kinds in ([("account_number", True), ("private_phone", False)], [("private_phone", False), ("account_number", True)]):
+        monkeypatch.setattr(server, "entities", fake(kinds))
+        assert server.scan(text) == ([(5, 14, "ID")], []), kinds                # also called a phone number: masked
 
 
 def test_flag_values(monkeypatch):
@@ -308,3 +347,4 @@ def test_flag_values(monkeypatch):
     monkeypatch.setenv("SETER_IL_ID_CHECK", "maybe")
     with pytest.raises(ValueError):
         server._flag("SETER_IL_ID_CHECK")
+    assert server._flag("SETER_IL_ID_CHECK", strict=False) is False             # the lenient form used for HF_HUB_OFFLINE

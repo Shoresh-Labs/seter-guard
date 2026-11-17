@@ -15,6 +15,16 @@ DEFAULT_COMMIT = "2744c393718de9a911d9db3478341984a99a7cdb"
 _REPO_ID = re.compile(r"^[\w.-]+(/[\w.-]+)?$")
 
 
+def _flag(name, strict=True):
+    """An on/off environment variable. An unrecognised value stops the server, or counts as off when not strict."""
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("1", "true", "on", "yes"):
+        return True
+    if strict and value not in ("", "0", "false", "off", "no"):
+        raise ValueError(f"{name}={value!r}: use 1 or 0")
+    return False
+
+
 def parse_model(value: str):
     """SETER_MODEL -> (model, revision, is_local).
 
@@ -48,7 +58,7 @@ def resolve_commit(model, revision, is_local):
         path = hf_hub_download(model, "config.json", revision=revision)
     except Exception as e:  # noqa: BLE001 - re-raised with what the operator needs to know
         hint = ""
-        if os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes", "on"):
+        if _flag("HF_HUB_OFFLINE", strict=False):
             baked = os.environ.get("SETER_BAKED_MODEL")
             hint = (" This process is offline (HF_HUB_OFFLINE=1) and can only load what is already downloaded"
                     + (f": this image was built with SETER_MODEL={baked}" if baked else "")
@@ -72,26 +82,31 @@ MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 
 
-def _flag(name):
-    value = os.environ.get(name, "").strip().lower()
-    if value in ("", "0", "false", "off", "no"):
-        return False
-    if value in ("1", "true", "on", "yes"):
-        return True
-    raise ValueError(f"{name}={value!r}: use 1 or 0")
-
-
 # ---- Israeli identity numbers ------------------------------------------------------------------------
 # An Israeli identity number (Teudat Zehut) is nine digits whose last digit is a check digit. The model
-# cannot do that arithmetic: it labels a nine-digit court or office file number the same way as an identity
-# number. With SETER_IL_ID_CHECK=1, a number of exactly nine digits that the model labelled as an id and that
-# fails the check is left in the text.
+# cannot do that arithmetic, and its account_number class ("ID" here) covers identity, passport, licence
+# and bank account numbers alike, so a nine-digit court or office file number is masked as one of them.
 #
-# Off by default, because failing the check only proves the number is not an Israeli identity number. US
-# social security numbers, many passport numbers and some bank account numbers are also nine digits, fail
-# the check nine times in ten, and would then pass through unmasked. Switch it on where nine-digit numbers
-# that are not Israeli identity numbers are reference numbers, as in Israeli legal text.
+# With SETER_IL_ID_CHECK=1 such a number is left in the text, but only when all of this holds:
+#   - the model labelled it ID, and no window of a long text called it anything else;
+#   - it is exactly nine ASCII digits standing alone, not a piece of a longer number or code;
+#   - the check digit is wrong, so it is not a correctly written Israeli identity number;
+#   - the words before it on the same line call it a file, case or reference number (REFERENCE_CUE);
+#   - and nothing before it on that line names an identity, passport, licence or account number (IDENTITY_CUE).
+# The last two matter because a wrong check digit does not make a number harmless. The first eight digits
+# of an identity number determine the ninth, so an identity number with a mistyped or misread last digit
+# still discloses the real one, and US social security numbers, many passport numbers and bank account
+# numbers are nine digits that fail the check nine times in ten. Without a cue, the number stays masked.
+#
+# Off by default: the cue is a word list, not understanding, and a guardrail that is unsure masks.
 IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
+CUE_CHARS = 48  # how far back on the line the cue words are looked for
+REFERENCE_CUE = re.compile(
+    r"תיק|הליך|אסמכתא|פנייה|פניה|ملف|قضية|مرجع"
+    r"|\b(?:case|file|docket|ref|reference|ticket)\b", re.IGNORECASE)
+IDENTITY_CUE = re.compile(
+    r"ת[\"״”'׳.]\s?ז|(?<!\w)תז(?!\w)|זהות|דרכון|רישיון|רשיון|חשבון|ח-ן|هوية|جواز|رخصة|حساب"
+    r"|\b(?:id|ids|ssn|passport|licen[cs]e|account|acct|iban|identity|social\s+security)\b", re.IGNORECASE)
 
 
 def il_id_check(number: str):
@@ -106,20 +121,28 @@ def il_id_check(number: str):
 
 
 def _stands_alone(text: str, a: int, b: int):
-    """The digits at text[a:b] are a whole number, not a piece of a longer number or code (12-034851272, A034851272)."""
-    before, after = text[a - 1:a], text[b:b + 1]
-    if before.isalnum() or after.isalnum():
-        return False
-    if before in ("-", "/", ".") and text[a - 2:a - 1].isdigit():
-        return False
-    if after in ("-", "/", ".") and text[b + 1:b + 2].isdigit():
-        return False
+    """The digits at text[a:b] are a whole number, not a piece of a longer number or code.
+
+    A letter or digit touching it makes it a piece (A034851272), and so does any other character that is not
+    whitespace when a digit sits on its far side (12-034851272, 034851272/21, 034851272\\21, 034851272:5)."""
+    for near, far in ((text[a - 1:a], text[a - 2:a - 1]), (text[b:b + 1], text[b + 1:b + 2])):
+        if near and not near.isspace() and (near.isalnum() or far.isdigit()):
+            return False
     return True
 
 
-def not_an_il_id(text: str, a: int, b: int, t: str):
-    """A span to leave unmasked: labelled as an id, exactly nine digits standing alone, check digit wrong."""
-    return IL_ID_CHECK and t == "ID" and il_id_check(text[a:b]) is False and _stands_alone(text, a, b)
+def _called_a_reference(text: str, a: int):
+    """The words before text[a] on its line call the number a file, case or reference number, and none of
+    them names an identity, passport, licence or account number."""
+    before = text[max(0, a - CUE_CHARS):a].rpartition("\n")[2]
+    return bool(REFERENCE_CUE.search(before)) and not IDENTITY_CUE.search(before)
+
+
+def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
+    """A detected span to leave in the text (see the conditions above). False whenever in doubt."""
+    return (IL_ID_CHECK and t == "ID" and not other_type_seen and il_id_check(text[a:b]) is False
+            and _stands_alone(text, a, b) and _called_a_reference(text, a))
+
 
 ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
@@ -253,8 +276,9 @@ def entities(text: str):
     return out
 
 
-def spans(text: str):
-    out = []  # [start, end, type, type_is_from_owner]
+def scan(text: str):
+    """(spans to mask, spans detected but left in the text), each a list of (start, end, type)."""
+    out = []  # [start, end, type, type_is_from_owner, another_type_was_reported]
     for e in sorted(entities(text), key=lambda e: (e["start"], not e["owner"], -e["end"])):
         if e["score"] < MIN_SCORE:
             continue
@@ -268,26 +292,39 @@ def spans(text: str):
             # the same stretch reported by two windows: mask the union (when in doubt, mask); the type comes from
             # the window that owns the text, whichever of the two spans starts first
             last[1] = max(last[1], b)
+            if t != last[2]:
+                last[4] = True  # the windows disagree: such a span is never released by a later check
             if e["owner"] and not last[3]:
                 last[2], last[3] = t, True
         # merge neighbours of the same type separated only by whitespace (e.g. أبو خالد)
         elif last and last[2] == t and text[last[1]:a].strip() == "":
             last[1] = b
         else:
-            out.append([a, b, t, e["owner"]])
-    # After merging, so that two numbers the model joined into one span are judged as what they are: not a
-    # single nine-digit number, and therefore masked.
-    return [(a, b, t) for a, b, t, _ in out if not not_an_il_id(text, a, b, t)]
+            out.append([a, b, t, e["owner"], False])
+    # Judged after merging, so that two numbers the model joined into one span are seen as what they are: not
+    # a single nine-digit number, and therefore masked.
+    masked, kept = [], []
+    for a, b, t, _owner, mixed in out:
+        (kept if releasable(text, a, b, t, mixed) else masked).append((a, b, t))
+    return masked, kept
 
 
-def mask(text: str):
+def spans(text: str):
+    return scan(text)[0]
+
+
+def _render(text: str, to_mask):
     res, pos, found = [], 0, []
-    for a, b, t in spans(text):
+    for a, b, t in to_mask:
         res += [text[pos:a], f"[{t}]"]
         found.append({"type": t, "start": a, "end": b})
         pos = b
     res.append(text[pos:])
     return "".join(res), found
+
+
+def mask(text: str):
+    return _render(text, spans(text))
 
 
 class RedactIn(BaseModel):
@@ -297,10 +334,13 @@ class RedactIn(BaseModel):
 @app.post("/v1/redact")
 def redact(body: RedactIn):
     try:
-        masked, found = mask(body.text)
+        to_mask, kept = scan(body.text)
     except TextTooLong as e:  # never return text that was not read
         raise HTTPException(status_code=413, detail=str(e))
-    return {"text": masked, "entities": found}
+    masked, found = _render(body.text, to_mask)
+    # kept: detected and deliberately left in the text, so a log can tell that from "nothing found"
+    return {"text": masked, "entities": found,
+            "kept": [{"type": t, "start": a, "end": b, "reason": "il_id_check"} for a, b, t in kept]}
 
 
 class GuardIn(BaseModel):
@@ -334,4 +374,4 @@ def litellm_guardrail(body: GuardIn):
 def health():
     # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
     return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
-            "revision": REVISION, "commit": COMMIT}
+            "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK}
