@@ -48,6 +48,18 @@ def test_default_is_pinned_and_health_reports_what_was_loaded():
         assert (h["model"], h["revision"], h["commit"]) == (model, revision, server.DEFAULT_COMMIT)
 
 
+def test_fast_model_local_attention_setting():
+    """transformers 4.x reads the rotary-position setting of the local-attention layers from `local_rope_theta`
+    and silently falls back to 10000 when the key is missing (fast v1.1); the model was trained with 160000."""
+    cfg = server.ner.model.config
+    if cfg.model_type != "modernbert":
+        return
+    theta = getattr(cfg, "local_rope_theta", None)
+    if theta is None:
+        theta = cfg.rope_parameters["sliding_attention"]["rope_theta"]
+    assert theta == 160000
+
+
 def test_parse_model(tmp_path, monkeypatch):
     assert server.parse_model("org/repo@v1.2") == ("org/repo", "v1.2", False)
     assert server.parse_model("org/repo") == ("org/repo", None, False)

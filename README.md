@@ -47,12 +47,12 @@ guardrails:
 
 | `SETER_MODEL` | What you get |
 |---|---|
-| `shoresh-labs/seter-pii-he-ar-fast@v1.1` | the fast model, pinned. This is the default, with or without Docker. |
+| `shoresh-labs/seter-pii-he-ar-fast@v1.1.1` | the fast model, pinned. This is the default, with or without Docker. |
 | `shoresh-labs/seter-pii-he-ar@v1.2` | the larger, more accurate model, pinned (about 2.3× slower on CPU) |
 | a repo without `@version` | whatever is newest in that repo; it changes when a new version is published |
 | a local folder | the model in that folder |
 
-`repo@` with nothing after it is refused, so a template with an unset version cannot quietly load the newest weights. The version is resolved to a commit once at start and everything is loaded by that commit. For the default, the server also checks that `v1.1` still points to the commit it did when this release was made, and refuses to start if the tag was moved. `GET /health` reports `model`, `source` (`hub` or `local`), `pinned`, the `revision` asked for and the `commit` actually loaded.
+`repo@` with nothing after it is refused, so a template with an unset version cannot quietly load the newest weights. The version is resolved to a commit once at start and everything is loaded by that commit. For the default, the server also checks that `v1.1.1` still points to the commit it did when this release was made, and refuses to start if the tag was moved. `GET /health` reports `model`, `source` (`hub` or `local`), `pinned`, the `revision` asked for and the `commit` actually loaded.
 
 With Docker the model is downloaded when the image is built, and the container never contacts the Hub afterwards (`HF_HUB_OFFLINE=1`), so a running image cannot change model. To build with another model:
 
@@ -74,6 +74,8 @@ A model reads a limited number of tokens per call (512 for the large model, abou
 | `SETER_MAX_TOKENS` | 16000 | Most tokens accepted in one request (all texts of a LiteLLM call together). More is refused before any scanning (`/v1/redact` returns 413; the LiteLLM endpoint returns `BLOCKED`), never passed through unread. On a CPU a window takes on the order of a second, so the default is about 40 windows. |
 
 Texts that fit in one window take a single model call, as before.
+
+**Use fast `v1.1.1`, not `v1.1`, with transformers 4.x.** The two have the same weights. `v1.1` has a `config.json` that transformers 4.x misreads without any warning, which makes the model miss more personal data (recall 0.967 instead of 0.980 on the held-out documents). `v1.1.1` is read correctly by transformers 4.57.6 and 5; `requirements.txt` asks for 4.57.6 or newer, the oldest version this was checked with.
 
 ## Accuracy
 
