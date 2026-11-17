@@ -79,15 +79,23 @@ Texts that fit in one window take a single model call, as before.
 
 An Israeli identity number (Teudat Zehut) is nine digits, and the last one is a check digit. The model cannot verify it, and its id class covers identity, passport, licence and bank account numbers alike, so a nine-digit court or office file number is masked as one of them. With `SETER_IL_ID_CHECK=1` such a number is left in the text when all of these hold:
 
-- the model labelled it as an id (and, in a long text, no window labelled it as anything else);
+- the model labelled it as an id, and in a long text no window labelled it as anything else, at any confidence;
 - it is exactly nine digits standing alone, not part of a longer number or code;
 - its check digit is wrong;
-- the words before it on the same line call it a file, case or reference number (`תיק`, `הליך`, `אסמכתא`, `case`, `file`, `ref` and a few more);
-- nothing before it on that line names an identity, passport, licence or account number.
+- the words directly before it name a case or proceeding number: `תיק`, `הליך` or `אסמכתא` (also with an attached ב, ל, ה, מ, ש, and `תיק הוצאה לפועל`), optionally followed by `מספר` or `מס'`; in English `case`, `file`, `docket`, `ref` or `reference` followed by `no.`, `number`, `#` or `:`;
+- nothing around it names an identity, passport, licence or account number, or a person's own record (medical, employee, customer, tax): not between the previous number on the line and this one, and not in the rest of its clause.
 
-So `תיק הוצאה לפועל מספר 034851272` is left as it is, while `ת.ז. 034851272`, `מספר דרכון 034851272`, `SSN 123456789` and a bare `034851272` stay masked. A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check.
+| Text | With the check on |
+|---|---|
+| `תיק הוצאה לפועל מספר 034851272 נפתח בלשכת חיפה.` | left as it is |
+| `מספר הליך 034851272, ת.ז. של החייב 034851279.` | file number left, identity number masked |
+| `ת.ז. 034851272`, `מספר דרכון 034851272`, `SSN 123456789`, a bare `034851272` | masked |
+| `תיק רפואי מספר 034851272`, `תיק 034851272 (ת.ז. של החייב)`, `אזרח ותיק, מספרו 034851272` | masked |
+| `In case you need it, my social is 123456789` | masked |
 
-It is off by default. The cue is a word list (`REFERENCE_CUE` and `IDENTITY_CUE` in `server.py`), so a file number described in other words stays masked, and an identity number described only as a file number would be released. `GET /health` reports `il_id_check`, and `/v1/redact` lists every number left in the text this way under `kept`.
+A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check.
+
+It is off by default. The rule is a set of word lists (`REFERENCE_BEFORE` and `IDENTITY_CUE` in `server.py`), not understanding. A file number described in other words stays masked. A personal number that the text introduces only as a case number, with no identity word near it, would be released. `GET /health` reports `il_id_check`, and `/v1/redact` lists every number left in the text this way under `kept`.
 
 ## Accuracy
 

@@ -281,18 +281,50 @@ def test_stands_alone():
         assert not server._stands_alone(text, a, a + 9), text
 
 
-def test_only_a_number_called_a_reference_can_be_released():
-    def called(text):
-        return server._called_a_reference(text, text.index(FILE_NO))
-    for text in (FILE_TEXT, f"מספר הליך {FILE_NO}", f"בתיק {FILE_NO}", f"Case no. {FILE_NO}", f"file {FILE_NO}", f"ملف رقم {FILE_NO}"):
-        assert called(text), text
-    for text in (f"מספר {FILE_NO}", f"call {FILE_NO} now", f"SSN {FILE_NO}",                 # no cue at all
-                 f"ת.ז. {FILE_NO}", f"ת\"ז {FILE_NO}", f"מספר תעודת הזהות שלו הוא {FILE_NO}",   # called an identity number
-                 f"תיק 12, ת.ז. של החייב {FILE_NO}", f"בתיק זה, חשבון {FILE_NO}", f"case file, passport {FILE_NO}",
-                 f"file ID {FILE_NO}", f"מספר דרכון {FILE_NO}", f"רישיון נהיגה מספר {FILE_NO}",
-                 f"תיק פתוח\nמספר {FILE_NO}",                                                # the cue is on another line
-                 "תיק " + "מילה " * 12 + FILE_NO):                                           # the cue is too far back
-        assert not called(text), text
+def _called(text, number=FILE_NO):
+    a = text.index(number)
+    return server._called_a_reference(text, a, a + 9)
+
+
+@pytest.mark.parametrize("text", [
+    FILE_TEXT, f"מספר הליך {FILE_NO}, ת.ז. של החייב {VALID_ID}.", f"ת.ז. של החייב {VALID_ID}, מספר הליך {FILE_NO}",
+    f"בתיק {FILE_NO}", f"שבתיק מס' {FILE_NO} נקבע", f"תיק הוצל\"פ {FILE_NO}", f"אסמכתא: {FILE_NO}",
+    f"Case no. {FILE_NO}", f"file #{FILE_NO}", f"ref: {FILE_NO}", f"docket number: {FILE_NO}",
+])
+def test_a_number_named_as_a_case_number_can_be_released(text):
+    assert _called(text)
+
+
+SSN = "123456789"
+
+
+@pytest.mark.parametrize("text", [
+    # no description, or the reference word is not directly before the number
+    f"מספר {FILE_NO}", f"call {FILE_NO} now", f"תיק פתוח\nמספר {FILE_NO}", f"התיק נסגר. מספר הזיהוי של דני לוי {FILE_NO}",
+    f"ref: employee {FILE_NO} (Dana Levi)", f"ticket opened by customer {FILE_NO}", f"ticket for passenger Dana Levi, frequent flyer {FILE_NO}",
+    # English reference words used as ordinary words
+    f"In case you need it, my social is {SSN}", f"Please file the claim for John Smith {SSN}",
+    f"Per our file, the customer's social {SSN} is verified", f"Case worker John Smith, SS# {SSN}",
+    f"His profile shows the personal number he gave us then: {FILE_NO}", f"The passport-case file of this person lists the following: {FILE_NO}",
+    # Hebrew words that only contain a reference word
+    f"אזרח ותיק, מספרו {FILE_NO}", f"אזרח ותיק מספר {FILE_NO}", f"לצורך תיקון הפרטים שלי: {FILE_NO}", f"בתהליך האימות נמסר המספר {FILE_NO}",
+    f"הפניה לרופא עבור מטופל {FILE_NO}", f"כרטיס הפתיקים שלו, והמספר האישי שרשום עליו הוא: {FILE_NO}",
+    # a person's own file is not a case
+    f"תיק רפואי של מטופל מספר {FILE_NO}", f"תיק רפואי מספר {FILE_NO}", f"תיק אישי של העובד דני לוי {FILE_NO}",
+    f"תיק במס הכנסה של דני לוי: {FILE_NO}", f"ملف المريض أحمد خالد رقم {FILE_NO}", f"patient file no. {FILE_NO}", f"File for patient John Smith, MRN {SSN}",
+    # named as an identity, passport, licence or account number, near or far, in any form
+    f"SSN {FILE_NO}", f"ת.ז. {FILE_NO}", f"ת\"ז {FILE_NO}", f"file ID {FILE_NO}", f"מספר דרכון {FILE_NO}", f"case 12, I.D. {FILE_NO}",
+    f"מספר תעודת הזהות של החייב שנגדו נפתח התיק בלשכת ההוצאה לפועל בחיפה הוא {FILE_NO}",
+    f"Passport number of the debtor named in the enforcement case opened in Haifa: {FILE_NO}",
+    f"בתיק זה צוין כי מספר דרכונו {FILE_NO}", f"בתיק זה צוין מספר רישיונו {FILE_NO}", f"תיק ניכויים, מספר זיהוי {FILE_NO}",
+    f"בתיק זה, מספר מזהה של החייב {FILE_NO}", f"תיק מע\"מ, עוסק מורשה {FILE_NO}", f"בתיק זה, ביטוח לאומי {FILE_NO}", f"בתיק זה, מספר אישי {FILE_NO}",
+    '{"file": "a.pdf", "user_id": "%s"}' % FILE_NO, f"ملف المريض، رقم الهويه {FILE_NO}", f"Reference check for Dana Levi, national number {FILE_NO}",
+    # the label comes after the number
+    f"תיק {FILE_NO} (ת.ז. של החייב)", f"תיק {FILE_NO} (ת.ז. של החייב), טלפון 0541234567", f"case no. {FILE_NO} (his passport)",
+    f"תיק מספר {FILE_NO} - מספר הזהות של הנתבע",
+])
+def test_everything_else_stays_masked(text):
+    assert not _called(text, SSN if SSN in text else FILE_NO)
 
 
 def test_il_id_check_is_off_by_default(monkeypatch):
@@ -319,7 +351,8 @@ def test_il_id_check_releases_a_file_number_and_nothing_else(monkeypatch):
     # a US social security number, a number with no description, a piece of a longer code
     for text in (f"ת.ז. {FILE_NO}", f"מספר תעודת הזהות שלו הוא {FILE_NO}.", f"מספר דרכון {FILE_NO}",
                  f"בנק 12 סניף 345 חשבון {FILE_NO}", "SSN 123456789 on file for Dana Levi",
-                 f"מספר תעודת הזהות שלו {FILE_NO[:8]}-{FILE_NO[8]}", f"תיק הוצאה לפועל מספר {FILE_NO}\\21 נפתח"):
+                 f"מספר תעודת הזהות שלו {FILE_NO[:8]}-{FILE_NO[8]}", f"תיק הוצאה לפועל מספר {FILE_NO}\\21 נפתח",
+                 f"תיק רפואי מספר {FILE_NO}", f"תיק {FILE_NO} (ת.ז. של החייב)"):
         got = redact(text)
         digits = "123456789" if "SSN" in text else FILE_NO[:8]
         assert digits not in got["text"] and got["kept"] == [], got
@@ -330,7 +363,7 @@ def test_il_id_check_releases_a_file_number_and_nothing_else(monkeypatch):
 
 def test_a_number_two_windows_disagree_about_is_not_released(monkeypatch):
     monkeypatch.setattr(server, "IL_ID_CHECK", True)
-    text = f"case {FILE_NO} now"
+    text = f"ref: {FILE_NO} now"
     def fake(kinds):
         return lambda _t: [{"start": 5, "end": 14, "entity_group": k, "score": 0.9, "owner": o} for k, o in kinds]
     monkeypatch.setattr(server, "entities", fake([("account_number", True)]))
@@ -338,6 +371,10 @@ def test_a_number_two_windows_disagree_about_is_not_released(monkeypatch):
     for kinds in ([("account_number", True), ("private_phone", False)], [("private_phone", False), ("account_number", True)]):
         monkeypatch.setattr(server, "entities", fake(kinds))
         assert server.scan(text) == ([(5, 14, "ID")], []), kinds                # also called a phone number: masked
+    weak = lambda _t: [{"start": 5, "end": 14, "entity_group": k, "score": sc, "owner": o}
+                       for k, sc, o in (("account_number", 0.9, True), ("private_phone", 0.2, False))]
+    monkeypatch.setattr(server, "entities", weak)
+    assert server.scan(text) == ([(5, 14, "ID")], [])                          # a low-score second opinion counts too
 
 
 def test_flag_values(monkeypatch):

@@ -88,25 +88,39 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 # and bank account numbers alike, so a nine-digit court or office file number is masked as one of them.
 #
 # With SETER_IL_ID_CHECK=1 such a number is left in the text, but only when all of this holds:
-#   - the model labelled it ID, and no window of a long text called it anything else;
+#   - the model labelled it ID, and no window called it anything else, at any confidence;
 #   - it is exactly nine ASCII digits standing alone, not a piece of a longer number or code;
 #   - the check digit is wrong, so it is not a correctly written Israeli identity number;
-#   - the words before it on the same line call it a file, case or reference number (REFERENCE_CUE);
-#   - and nothing before it on that line names an identity, passport, licence or account number (IDENTITY_CUE).
+#   - the words directly before it name a case or proceeding number (REFERENCE_BEFORE): "תיק הוצאה לפועל
+#     מספר", "בהליך", "case no.", with nothing else between those words and the number;
+#   - and nothing around it names an identity, passport, licence or account number, or a person's own
+#     record (IDENTITY_CUE): not between the previous number on the line and this one, and not in the
+#     rest of its clause.
 # The last two matter because a wrong check digit does not make a number harmless. The first eight digits
 # of an identity number determine the ninth, so an identity number with a mistyped or misread last digit
 # still discloses the real one, and US social security numbers, many passport numbers and bank account
-# numbers are nine digits that fail the check nine times in ten. Without a cue, the number stays masked.
+# numbers are nine digits that fail the check nine times in ten. A reference word somewhere nearby is not
+# enough either: "in case you need it", "אזרח ותיק", "תיק רפואי" are not case numbers.
 #
-# Off by default: the cue is a word list, not understanding, and a guardrail that is unsure masks.
+# Off by default: these are word lists, not understanding, and a guardrail that is unsure masks.
 IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
-CUE_CHARS = 48  # how far back on the line the cue words are looked for
-REFERENCE_CUE = re.compile(
-    r"תיק|הליך|אסמכתא|פנייה|פניה|ملف|قضية|مرجع"
-    r"|\b(?:case|file|docket|ref|reference|ticket)\b", re.IGNORECASE)
+_HE = "א-ת"
+# Hebrew: תיק / הליך / אסמכתא as whole words, alone or after the attached prefixes ב ל ה מ ש (and ו before
+# one of those; a bare ו would make "ותיק", a veteran). תיק may be followed by "הוצאה לפועל" only: a medical,
+# personal or tax file is a person's record, not a case. English needs an explicit number marker, because
+# "case" and "file" are ordinary words. Arabic has no reference words here (ملف is usually a personal file).
+REFERENCE_BEFORE = re.compile(
+    rf"(?:(?<![{_HE}])(?:ו?[בלהמש]{{1,2}})?(?:תיק(?:\s+ה?(?:הוצאה\s+לפועל|הוצל[\"״”]פ))?|הליך|אסמכתא)"
+    rf"(?:\s+(?:מספר|מס['׳.]?))?\s*:?"
+    r"|(?<![a-z_])(?:case|file|docket|reference|ref)\s*(?:(?:no|num|number)\b\.?\s*:?|#|:))"
+    r"\s*#?\s*$", re.IGNORECASE)
 IDENTITY_CUE = re.compile(
-    r"ת[\"״”'׳.]\s?ז|(?<!\w)תז(?!\w)|זהות|דרכון|רישיון|רשיון|חשבון|ח-ן|هوية|جواز|رخصة|حساب"
-    r"|\b(?:id|ids|ssn|passport|licen[cs]e|account|acct|iban|identity|social\s+security)\b", re.IGNORECASE)
+    rf"ת[\"״”'׳.]\s?ז|(?<![{_HE}])תז(?![{_HE}])|זהות|זיהוי|מזהה|דרכו[ןנ]|ר?י?שיו[ןנ]|חשבו[ןנ]|ח-ן|עוסק|ביטוח\s+לאומי|מספר\s+אישי"
+    r"|רפואי|מטופל|עובד|לקוח|מס\s+הכנסה|هوي[ةه]|جواز|رخصة|حساب|مريض"
+    r"|(?<![a-z])(?:ids?|i\.d|ssn|ss#|social|passport|licen[cs]e|account|acct|iban|identity|national|mrn|patient|employee"
+    r"|customer|member|user|passenger|personal)(?![a-z])", re.IGNORECASE)
+_LONG_NUMBER = re.compile(r"\d[\d-]{3,}\d")           # five characters or more: another number on the line
+_CLAUSE_END = re.compile(r"[,;]|[.!?](?=\s|$)")
 
 
 def il_id_check(number: str):
@@ -131,17 +145,30 @@ def _stands_alone(text: str, a: int, b: int):
     return True
 
 
-def _called_a_reference(text: str, a: int):
-    """The words before text[a] on its line call the number a file, case or reference number, and none of
-    them names an identity, passport, licence or account number."""
-    before = text[max(0, a - CUE_CHARS):a].rpartition("\n")[2]
-    return bool(REFERENCE_CUE.search(before)) and not IDENTITY_CUE.search(before)
+def _called_a_reference(text: str, a: int, b: int):
+    """The words directly before text[a:b] name a case or proceeding number, and nothing around it names an
+    identity, passport, licence or account number or a person's own record."""
+    line_start = text.rfind("\n", 0, a) + 1
+    line_end = text.find("\n", b)
+    before, after = text[line_start:a], text[b:len(text) if line_end < 0 else line_end]
+    if not REFERENCE_BEFORE.search(before):
+        return False
+    # Words before an earlier number on the line describe that number; everything after it describes this one.
+    earlier = [m.end() for m in _LONG_NUMBER.finditer(before)]
+    if IDENTITY_CUE.search(before[earlier[-1] if earlier else 0:]):
+        return False
+    # A label can follow the number: "תיק 034851272 (ת.ז. של החייב)". Read to the end of the clause or to the
+    # next number, whichever comes first; a label after that belongs to something else.
+    nxt = _LONG_NUMBER.search(after)
+    stop = nxt.start() if nxt else len(after)
+    clause = _CLAUSE_END.search(after, 0, stop)  # the full stops inside "ת.ז." are not followed by a space
+    return not IDENTITY_CUE.search(after[:clause.start() if clause else stop])
 
 
 def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
     """A detected span to leave in the text (see the conditions above). False whenever in doubt."""
     return (IL_ID_CHECK and t == "ID" and not other_type_seen and il_id_check(text[a:b]) is False
-            and _stands_alone(text, a, b) and _called_a_reference(text, a))
+            and _stands_alone(text, a, b) and _called_a_reference(text, a, b))
 
 
 ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
@@ -279,8 +306,10 @@ def entities(text: str):
 def scan(text: str):
     """(spans to mask, spans detected but left in the text), each a list of (start, end, type)."""
     out = []  # [start, end, type, type_is_from_owner, another_type_was_reported]
+    doubts = []  # (start, end, type) of what the model reported below MIN_SCORE: not masked, but not ignored either
     for e in sorted(entities(text), key=lambda e: (e["start"], not e["owner"], -e["end"])):
         if e["score"] < MIN_SCORE:
+            doubts.append((e["start"], e["end"], TAGS.get(e["entity_group"], "PII")))
             continue
         a, b, t = e["start"], e["end"], TAGS.get(e["entity_group"], "PII")
         while a < b and text[a].isspace():
@@ -305,6 +334,8 @@ def scan(text: str):
     # a single nine-digit number, and therefore masked.
     masked, kept = [], []
     for a, b, t, _owner, mixed in out:
+        # a weak second opinion counts too: if any window called part of this span something else, it stays masked
+        mixed = mixed or any(x < b and a < y and u != t for x, y, u in doubts)
         (kept if releasable(text, a, b, t, mixed) else masked).append((a, b, t))
     return masked, kept
 
