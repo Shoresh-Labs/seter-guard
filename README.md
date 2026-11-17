@@ -75,6 +75,12 @@ A model reads a limited number of tokens per call (512 for the large model, abou
 
 Texts that fit in one window take a single model call, as before.
 
+## Israeli identity numbers (optional check)
+
+An Israeli identity number (Teudat Zehut) is nine digits, and the last one is a check digit. The model cannot verify it, so it masks a nine-digit court or office file number the same way as an identity number. With `SETER_IL_ID_CHECK=1`, a number that the model labelled as an id, that is exactly nine digits standing alone, and that fails the check is left in the text. Numbers that pass, and every other shape (with a hyphen, eight or ten digits, part of a longer code), are masked as before.
+
+It is off by default. Failing the check only proves that a number is not an Israeli identity number: US social security numbers, many passport numbers and some bank account numbers are also nine digits, fail the check nine times in ten, and would pass through unmasked. Switch it on for text where nine-digit numbers that are not identity numbers are reference numbers, such as Israeli legal documents. About one random nine-digit number in ten passes the check by chance and stays masked.
+
 ## Accuracy
 
 Character-level F1 on the Hebrew, Arabic and English records of the REDACT benchmark:

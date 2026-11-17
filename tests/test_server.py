@@ -248,3 +248,63 @@ def test_settings_that_would_skip_text_are_rejected(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     window, overlap, _, _ = server._settings()
     assert window <= limit and server.MIN_OVERLAP <= overlap <= window // 2
+
+
+# ---- Israeli identity numbers ----
+
+VALID_ID, FILE_NO = "034851279", "034851272"   # the same eight digits with the right and a wrong check digit
+
+
+def test_il_id_check_digit():
+    assert server.il_id_check(VALID_ID) is True and server.il_id_check(FILE_NO) is False
+    assert server.il_id_check("000000018") is True and server.il_id_check("123456782") is True
+    wrong = [VALID_ID[:8] + str(d) for d in range(10) if str(d) != VALID_ID[8]]
+    assert all(server.il_id_check(n) is False for n in wrong)               # exactly one check digit fits
+    for other in ("03485127", "0348512790", "03485127-9", "٠٣٤٨٥١٢٧٩", "03485127a", ""):
+        assert server.il_id_check(other) is None                           # not nine plain digits: no opinion
+
+
+def test_stands_alone():
+    for text in (f"מספר {FILE_NO} נפתח", FILE_NO, f"ת.ז.{FILE_NO}.", f"({FILE_NO})", f"מ-{FILE_NO}, ועוד"):
+        a = text.index(FILE_NO)
+        assert server._stands_alone(text, a, a + 9), text
+    for text in (f"12-{FILE_NO}", f"{FILE_NO}-55", f"A{FILE_NO}", f"{FILE_NO}/21", f"1{FILE_NO}", f"{FILE_NO}.5"):
+        a = text.index(FILE_NO)
+        assert not server._stands_alone(text, a, a + 9), text
+
+
+FILE_TEXT = f"מספר תעודת הזהות שלו הוא {FILE_NO}."
+ID_TEXT = f"מספר תעודת הזהות שלו הוא {VALID_ID}."
+
+
+def test_il_id_check_is_off_by_default():
+    assert server.IL_ID_CHECK is False or "SETER_IL_ID_CHECK" in os.environ
+    for text, number in ((FILE_TEXT, FILE_NO), (ID_TEXT, VALID_ID)):
+        assert number not in c.post("/v1/redact", json={"text": text}).json()["text"]
+
+
+def test_il_id_check_leaves_a_failing_nine_digit_number_and_masks_the_rest(monkeypatch):
+    monkeypatch.setattr(server, "IL_ID_CHECK", True)
+    r = c.post("/v1/redact", json={"text": FILE_TEXT}).json()
+    assert r["text"] == FILE_TEXT and r["entities"] == []
+    r = c.post("/v1/redact", json={"text": ID_TEXT}).json()
+    assert VALID_ID not in r["text"] and "[ID]" in r["text"]
+    both = f"{FILE_TEXT} שמו רון אברהם, ומספר הזהות של אשתו {VALID_ID}."
+    r = c.post("/v1/redact", json={"text": both}).json()["text"]
+    assert FILE_NO in r and VALID_ID not in r and "רון" not in r
+    # not a single nine-digit number: masked whatever the digits are
+    for text in (f"מספר תעודת הזהות שלו {FILE_NO[:8]}-{FILE_NO[8]}", f"מספר חשבון הבנק שלו {FILE_NO}5"):
+        masked = c.post("/v1/redact", json={"text": text}).json()["text"]
+        assert FILE_NO[:8] not in masked, masked
+    # the LiteLLM endpoint follows: nothing left to mask means no intervention
+    assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [FILE_TEXT]}).json() == {"action": "NONE"}
+    assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [ID_TEXT]}).json()["action"] == "GUARDRAIL_INTERVENED"
+
+
+def test_flag_values(monkeypatch):
+    for value, want in (("1", True), ("true", True), ("ON", True), ("0", False), ("", False), ("off", False)):
+        monkeypatch.setenv("SETER_IL_ID_CHECK", value)
+        assert server._flag("SETER_IL_ID_CHECK") is want
+    monkeypatch.setenv("SETER_IL_ID_CHECK", "maybe")
+    with pytest.raises(ValueError):
+        server._flag("SETER_IL_ID_CHECK")

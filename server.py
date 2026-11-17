@@ -71,6 +71,56 @@ TAGS = {"private_person": "PERSON", "private_address": "ADDRESS", "private_phone
 MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 
+
+def _flag(name):
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("", "0", "false", "off", "no"):
+        return False
+    if value in ("1", "true", "on", "yes"):
+        return True
+    raise ValueError(f"{name}={value!r}: use 1 or 0")
+
+
+# ---- Israeli identity numbers ------------------------------------------------------------------------
+# An Israeli identity number (Teudat Zehut) is nine digits whose last digit is a check digit. The model
+# cannot do that arithmetic: it labels a nine-digit court or office file number the same way as an identity
+# number. With SETER_IL_ID_CHECK=1, a number of exactly nine digits that the model labelled as an id and that
+# fails the check is left in the text.
+#
+# Off by default, because failing the check only proves the number is not an Israeli identity number. US
+# social security numbers, many passport numbers and some bank account numbers are also nine digits, fail
+# the check nine times in ten, and would then pass through unmasked. Switch it on where nine-digit numbers
+# that are not Israeli identity numbers are reference numbers, as in Israeli legal text.
+IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
+
+
+def il_id_check(number: str):
+    """True or False for nine ASCII digits (does the check digit match?), None for anything else."""
+    if len(number) != 9 or not (number.isascii() and number.isdigit()):
+        return None
+    total = 0
+    for i, ch in enumerate(number):
+        d = int(ch) * (1 + i % 2)
+        total += d if d < 10 else d - 9
+    return total % 10 == 0
+
+
+def _stands_alone(text: str, a: int, b: int):
+    """The digits at text[a:b] are a whole number, not a piece of a longer number or code (12-034851272, A034851272)."""
+    before, after = text[a - 1:a], text[b:b + 1]
+    if before.isalnum() or after.isalnum():
+        return False
+    if before in ("-", "/", ".") and text[a - 2:a - 1].isdigit():
+        return False
+    if after in ("-", "/", ".") and text[b + 1:b + 2].isdigit():
+        return False
+    return True
+
+
+def not_an_il_id(text: str, a: int, b: int, t: str):
+    """A span to leave unmasked: labelled as an id, exactly nine digits standing alone, check digit wrong."""
+    return IL_ID_CHECK and t == "ID" and il_id_check(text[a:b]) is False and _stands_alone(text, a, b)
+
 ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
 
@@ -225,7 +275,9 @@ def spans(text: str):
             last[1] = b
         else:
             out.append([a, b, t, e["owner"]])
-    return [(a, b, t) for a, b, t, _ in out]
+    # After merging, so that two numbers the model joined into one span are judged as what they are: not a
+    # single nine-digit number, and therefore masked.
+    return [(a, b, t) for a, b, t, _ in out if not not_an_il_id(text, a, b, t)]
 
 
 def mask(text: str):
