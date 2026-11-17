@@ -8,10 +8,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
 
-DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1"
-# The commit that tag pointed to when this line was written. A tag can be moved on the Hub; if v1.1 ever
+# v1.1.1 = the v1.1 weights with a config.json that transformers 4.x reads correctly. With v1.1 and
+# transformers 4.x the local-attention layers silently used the wrong rotary-position setting and the
+# model missed more (held-out recall 0.967 instead of 0.980).
+DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1.1"
+# The commit that tag pointed to when this line was written. A tag can be moved on the Hub; if v1.1.1 ever
 # resolves to anything else the server refuses to start instead of running weights nobody chose.
-DEFAULT_COMMIT = "2744c393718de9a911d9db3478341984a99a7cdb"
+DEFAULT_COMMIT = "170f528e2aeb93e25b71300bb535a583d640e9f7"
 _REPO_ID = re.compile(r"^[\w.-]+(/[\w.-]+)?$")
 
 

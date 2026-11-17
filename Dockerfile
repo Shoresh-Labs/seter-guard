@@ -4,7 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 COPY server.py .
 # repo@version. Another model: docker build --build-arg SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 .
-ARG SETER_MODEL=shoresh-labs/seter-pii-he-ar-fast@v1.1
+ARG SETER_MODEL=shoresh-labs/seter-pii-he-ar-fast@v1.1.1
 ENV SETER_MODEL=$SETER_MODEL SETER_BAKED_MODEL=$SETER_MODEL
 # download the model at build time so the container runs offline
 # optional Hugging Face token (private/gated models, higher rate limits), passed as a build
