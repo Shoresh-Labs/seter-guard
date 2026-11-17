@@ -367,7 +367,7 @@ def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(t
     f"שלום \ue000, הליך {FILE_NO}", f"שלום 🙂, הליך {FILE_NO}",
     # control characters that Python counts as whitespace, and symbols that fold into a space plus an accent
     f"שלום\x1cרב, מספר הליך {FILE_NO}", f"שלום\x85רב, הליך {FILE_NO}", f"דר\u00b4כון, הליך {FILE_NO}", f"דר\u00a8כון, הליך {FILE_NO}",
-    f"דר\u0903כון, הליך {FILE_NO}",
+    f"דר\u0903כון, הליך {FILE_NO}", f"של\u0903ת.ז. החייב, מספר הליך {FILE_NO}", f"שלום\u0903רב, מספר הליך {FILE_NO}",
     # a label stretched with spaces beyond any fixed length still counts when it reaches into the searched text
     "ביטוח" + " " * 400 + "לאומי\n" + f"מספר הליך {FILE_NO}", "מספר הליך " + FILE_NO + " " * 150 + "ביטוח" + " " * 300 + "לאומי",
     # a word that starts just outside the nearby text and reaches into it (the line break keeps it off the number's line)

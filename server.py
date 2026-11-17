@@ -224,6 +224,8 @@ def _is_odd(ch: str):
     if ch in _BIDI or ch in "\t\n\r\v\f":
         return False
     category = unicodedata.category(ch)
+    if category == "Mc":         # a spacing mark takes up room like a letter, and none belongs to Hebrew, Arabic or Latin
+        return True
     if category[0] in "LNMPZ":   # Z: spaces and line separators; other control characters are not whitespace here
         return False
     if not (category in ("Sm", "Sc", "Sk") or (category == "So" and ord(ch) < 0x2000)):
@@ -249,10 +251,11 @@ def _cue_positions(text: str):
             odd.append(i)
         for c in unicodedata.normalize("NFKC", ch):
             category = unicodedata.category(c)
-            if category[0] == "M":   # all marks, spacing ones included
+            if category in ("Mn", "Me"):   # marks that sit on a letter: gone in both readings
                 continue
-            # hidden: shows nothing, or is a space that folding made out of something that was not one
-            hidden = category == "Cf" or c in _FILLERS or (c.isspace() and not ch.isspace())
+            # hidden: shows nothing, is a spacing mark, or is a space that folding made out of something that was
+            # not one. Removed in one reading and a space in the other, so it can neither split nor join a word.
+            hidden = category in ("Cf", "Mc") or c in _FILLERS or (c.isspace() and not ch.isspace())
             origin.append(i)
             joined.append("" if hidden else c)
             spaced.append(" " if hidden else c)
