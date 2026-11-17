@@ -207,41 +207,76 @@ def _stands_alone(text: str, a: int, b: int):
     return True
 
 
+_BIDI = set("‎‏‪‫‬‭‮⁦⁧⁨⁩")   # ordinary beside digits in Hebrew text
+# Characters that show nothing and have no ordinary use inside Hebrew or English prose (fillers, joiners,
+# variation selectors that are not marks). Their presence near a number is itself a reason not to release it.
+_FILLERS = set("͏ᅟᅠ឴឵᠋᠌᠍᠎᠏ㅤﾠ")
+_CUE_REACH = 64  # no cue word is longer than this, hidden characters included (longer ones are caught as odd characters)
+
+
 @lru_cache(maxsize=8)
 def _cue_positions(text: str):
-    """(where identity words start, where person words start) in `text`, each a sorted list, found once per text.
+    """(identity words, person words, odd characters) in `text`, found once per text: the first two are sorted
+    lists of (start, end) in the original text, the last a sorted list of positions.
 
-    The words are searched in a cleaned copy: format characters (direction marks, zero-width characters, soft
-    hyphens) and Hebrew points removed, compatibility forms folded (NFKC), so "ת‏.ז" and "ｐａｓｓｐｏｒｔ"
-    are found. Positions are mapped back to the original text."""
-    chars, origin = [], []
+    The words are searched in cleaned copies of the text: compatibility forms folded (NFKC, so full-width
+    letters and presentation forms read as plain ones), marks removed (Hebrew points, combining characters,
+    variation selectors), and format characters (direction marks, zero-width characters, soft hyphens) either
+    removed or turned into a space. Both readings are searched and a word found in either counts, so cleaning
+    can only add words, never hide one: removing joins "דר|כון", a space keeps "של|ת.ז" apart.
+    A format character other than a direction mark, or a filler, is also reported as odd: nothing is
+    released near one."""
+    joined, spaced, origin, odd = [], [], [], []
     for i, ch in enumerate(text):
-        if unicodedata.category(ch) == "Cf" or _NIQQUD.match(ch):
-            continue
+        category = unicodedata.category(ch)
+        if (category == "Cf" and ch not in _BIDI) or ch in _FILLERS:
+            odd.append(i)
         for c in unicodedata.normalize("NFKC", ch):
-            chars.append(c)
+            category = unicodedata.category(c)
+            if category in ("Mn", "Me") or c in _FILLERS:
+                continue
             origin.append(i)
-    clean = "".join(chars)
-    return tuple([origin[m.start()] for m in rx.finditer(clean)] for rx in (IDENTITY_CUE, PERSON_RECORD))
+            joined.append("" if category == "Cf" else c)
+            spaced.append(" " if category == "Cf" else c)
+    # `spaced` has one character per entry of origin; `joined` needs its own map because entries vanish
+    joined_origin = [o for o, c in zip(origin, joined) if c]
+    found = []
+    for rx in (IDENTITY_CUE, PERSON_RECORD):
+        spans = {(origin[m.start()], origin[m.end() - 1] + 1) for m in rx.finditer("".join(spaced))}
+        spans |= {(joined_origin[m.start()], joined_origin[m.end() - 1] + 1) for m in rx.finditer("".join(joined))}
+        found.append(sorted(spans))
+    return found[0], found[1], odd
 
 
-def _any_between(positions, lo, hi):
-    k = bisect.bisect_left(positions, lo)
-    return k < len(positions) and positions[k] < hi
+def _any_between(spans, lo, hi):
+    """Some (start, end) in the sorted list overlaps [lo, hi): a word that begins before lo and reaches into
+    the range counts."""
+    k = bisect.bisect_left(spans, (lo - _CUE_REACH, 0))
+    while k < len(spans) and spans[k][0] < hi:
+        if spans[k][1] > lo:
+            return True
+        k += 1
+    return False
 
 
 def _called_a_reference(text: str, a: int, b: int):
     """The words directly before text[a:b] name an enforcement or proceeding number, and the text around it
     has no word about an identity, passport, licence or account number or about whose record it is."""
     line_start = text.rfind("\n", 0, a) + 1
-    if not REFERENCE_BEFORE.search(text[max(line_start, a - REFERENCE_TAIL):a]):
+    tail = "".join(c for c in text[max(line_start, a - REFERENCE_TAIL):a] if c not in _BIDI)  # marks beside the digits
+    if not REFERENCE_BEFORE.search(tail):
         return False
     line_end = text.find("\n", b)
     line_end = len(text) if line_end < 0 else line_end
     near_start, near_end = max(0, a - CONTEXT_BEFORE), min(len(text), b + CONTEXT_AFTER)
-    identity, person = _cue_positions(text)
+    identity, person, odd = _cue_positions(text)
+    lo, hi = min(line_start, near_start), max(line_end, near_end)
+    # an invisible character with no business in prose: something may be hidden, so nothing is released
+    k = bisect.bisect_left(odd, lo)
+    if k < len(odd) and odd[k] < hi:
+        return False
     # whose record it is: the whole line and everything near, blank lines included
-    if _any_between(person, min(line_start, near_start), max(line_end, near_end)):
+    if _any_between(person, lo, hi):
         return False
     # a label for a number: the whole line and everything near within the paragraph
     blank = [m.end() for m in _BLANK_LINE.finditer(text, near_start, a)]

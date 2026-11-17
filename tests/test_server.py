@@ -300,6 +300,8 @@ def test_stands_alone():
     f"לאור העובדות שבתיק ההוצאה לפועל {FILE_NO}", f"עובדה היא שבהליך {FILE_NO}", f"הבסיס העובדתי, הליך {FILE_NO}",
     f"חשבונית מס, אסמכתא {FILE_NO}", f"שתי חשבוניות, אסמכתא {FILE_NO}", f"הבקשה עוסקת בהליך {FILE_NO}",
     f"ההחלטה ניתנה בדלתיים סגורות. זאת ועוד, בהליך {FILE_NO} נקבע דיון", f"המכתב נשלח. נפתח הליך {FILE_NO}",
+    # direction marks are ordinary beside digits in Hebrew text
+    f"מספר הליך \u200f{FILE_NO}\u200f נדחה", f"\u202bמספר הליך {FILE_NO}\u202c",
     # an identity word in another paragraph is out of reach
     f"ת.ז. של החייב {VALID_ID}\n\nמספר הליך {FILE_NO}",
 ])
@@ -353,6 +355,13 @@ def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(t
     # a word hidden from the lists by an invisible character, a soft hyphen, vowel points or full-width letters
     f"ת\u200f.ז. של החייב, מספר הליך {FILE_NO}", f"דר\u200dכון, הליך {FILE_NO}", f"pass\u00adport, הליך {FILE_NO}",
     f"ｐａｓｓｐｏｒｔ, הליך {FILE_NO}", f"מְטוּפָּל, הליך {FILE_NO}", f"מספר הליך {FILE_NO} (ת\u2060.ז.)",
+    # removing an invisible character must not join two words and so hide the second ("של" + "ת.ז")
+    f"של\u200fת.ז. החייב, מספר הליך {FILE_NO}", f"מספר\u200eדרכון, הליך {FILE_NO}",
+    # an invisible character with no place in prose: nothing is released near it, whatever it hides
+    f"שלום\u200b רב, מספר הליך {FILE_NO}", f"מספר הליך {FILE_NO} נדחה\u2060 אתמול", f"שלום\u3164רב, מספר הליך {FILE_NO}",
+    f"שלום\ufeffרב, הליך {FILE_NO}", f"דר\u034fכון, הליך {FILE_NO}", f"דרכו\ufe0fן, הליך {FILE_NO}",
+    # a word that starts just outside the nearby text and reaches into it (the line break keeps it off the number's line)
+    "מספר הזהות\n" + "א" * 284 + f" מספר הליך {FILE_NO}",
     # ... also when it describes another number: telling which number a label belongs to is where earlier versions leaked
     f"מספר הליך {FILE_NO}, ת.ז. של החייב {VALID_ID}.", f"ת.ז. של החייב {VALID_ID}, מספר הליך {FILE_NO}",
     # the label comes after the number
