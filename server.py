@@ -139,7 +139,7 @@ PERSON_RECORD = re.compile(
     r"|(?<![a-z])(?:patient|employee|customer|client|passenger|student|taxpayer|member|user)s?(?![a-z])", re.IGNORECASE)
 _BLANK_LINE = re.compile(r"\n[^\S\n]*\n")
 _NIQQUD = re.compile("[֑-ׇ]")
-_INVISIBLE = "‎‏‪‫‬‭‮⁦⁧⁨⁩﻿"   # direction marks around digits
+_INVISIBLE = "\u200e\u200f\u061c"   # direction marks that may sit beside digits
 
 
 class _WhenNothingElseListens(logging.StreamHandler):
@@ -207,37 +207,51 @@ def _stands_alone(text: str, a: int, b: int):
     return True
 
 
-_BIDI = set("‎‏‪‫‬‭‮⁦⁧⁨⁩")   # ordinary beside digits in Hebrew text
-# Characters that show nothing and have no ordinary use inside Hebrew or English prose (fillers, joiners,
-# variation selectors that are not marks). Their presence near a number is itself a reason not to release it.
-_FILLERS = set("͏ᅟᅠ឴឵᠋᠌᠍᠎᠏ㅤﾠ")
-_CUE_REACH = 64  # no cue word is longer than this, hidden characters included (longer ones are caught as odd characters)
+_BIDI = set("‎‏؜")   # left-to-right, right-to-left and Arabic letter marks: ordinary beside digits
+# Letters by category that show nothing (Hangul and other fillers); everything else odd is caught by category.
+_FILLERS = set("͏ᅟᅠ឴឵᠋᠌᠍᠎᠏⠀ㅤﾠ")
+
+
+def _is_odd(ch: str):
+    """A character with no ordinary use in Hebrew, Arabic or English prose. Allowed: letters, digits, marks,
+    punctuation, whitespace, the three direction marks, and symbols except pictographic ones (U+2000 and up,
+    where blank glyphs such as U+2800 live). Everything else is odd: other format characters (zero-width
+    characters, soft hyphens, direction overrides, embeddings and isolates, which can make text read
+    differently from how it is stored), control characters, fillers, private-use and unassigned code points.
+    Nothing is released near an odd character."""
+    if ch in _FILLERS:
+        return True
+    if ch in _BIDI or ch.isspace():
+        return False
+    category = unicodedata.category(ch)
+    if category[0] in "LNMP":
+        return False
+    return not (category in ("Sm", "Sc", "Sk") or (category == "So" and ord(ch) < 0x2000))
 
 
 @lru_cache(maxsize=8)
 def _cue_positions(text: str):
-    """(identity words, person words, odd characters) in `text`, found once per text: the first two are sorted
-    lists of (start, end) in the original text, the last a sorted list of positions.
+    """(identity words, person words, odd characters, reach) in `text`, found once per text: the first two are
+    sorted lists of (start, end) in the original text, the third a sorted list of positions, the last the
+    length of the longest word found.
 
     The words are searched in cleaned copies of the text: compatibility forms folded (NFKC, so full-width
     letters and presentation forms read as plain ones), marks removed (Hebrew points, combining characters,
-    variation selectors), and format characters (direction marks, zero-width characters, soft hyphens) either
-    removed or turned into a space. Both readings are searched and a word found in either counts, so cleaning
-    can only add words, never hide one: removing joins "דר|כון", a space keeps "של|ת.ז" apart.
-    A format character other than a direction mark, or a filler, is also reported as odd: nothing is
-    released near one."""
+    variation selectors), and format characters and fillers either removed or turned into a space. Both
+    readings are searched and a word found in either counts, so cleaning can only add words, never hide
+    one: removing joins "דר|כון", a space keeps "של|ת.ז" apart."""
     joined, spaced, origin, odd = [], [], [], []
     for i, ch in enumerate(text):
-        category = unicodedata.category(ch)
-        if (category == "Cf" and ch not in _BIDI) or ch in _FILLERS:
+        if _is_odd(ch):
             odd.append(i)
         for c in unicodedata.normalize("NFKC", ch):
             category = unicodedata.category(c)
-            if category in ("Mn", "Me") or c in _FILLERS:
+            if category in ("Mn", "Me"):
                 continue
+            hidden = category == "Cf" or c in _FILLERS
             origin.append(i)
-            joined.append("" if category == "Cf" else c)
-            spaced.append(" " if category == "Cf" else c)
+            joined.append("" if hidden else c)
+            spaced.append(" " if hidden else c)
     # `spaced` has one character per entry of origin; `joined` needs its own map because entries vanish
     joined_origin = [o for o, c in zip(origin, joined) if c]
     found = []
@@ -245,13 +259,14 @@ def _cue_positions(text: str):
         spans = {(origin[m.start()], origin[m.end() - 1] + 1) for m in rx.finditer("".join(spaced))}
         spans |= {(joined_origin[m.start()], joined_origin[m.end() - 1] + 1) for m in rx.finditer("".join(joined))}
         found.append(sorted(spans))
-    return found[0], found[1], odd
+    reach = max((e - s for spans in found for s, e in spans), default=0)
+    return found[0], found[1], odd, reach
 
 
-def _any_between(spans, lo, hi):
+def _any_between(spans, lo, hi, reach):
     """Some (start, end) in the sorted list overlaps [lo, hi): a word that begins before lo and reaches into
-    the range counts."""
-    k = bisect.bisect_left(spans, (lo - _CUE_REACH, 0))
+    the range counts. `reach` is the longest word in the text, so no such word begins before lo - reach."""
+    k = bisect.bisect_left(spans, (lo - reach, 0))
     while k < len(spans) and spans[k][0] < hi:
         if spans[k][1] > lo:
             return True
@@ -269,14 +284,14 @@ def _called_a_reference(text: str, a: int, b: int):
     line_end = text.find("\n", b)
     line_end = len(text) if line_end < 0 else line_end
     near_start, near_end = max(0, a - CONTEXT_BEFORE), min(len(text), b + CONTEXT_AFTER)
-    identity, person, odd = _cue_positions(text)
+    identity, person, odd, reach = _cue_positions(text)
     lo, hi = min(line_start, near_start), max(line_end, near_end)
-    # an invisible character with no business in prose: something may be hidden, so nothing is released
+    # a character with no business in prose (see _is_odd): something may be hidden, so nothing is released
     k = bisect.bisect_left(odd, lo)
     if k < len(odd) and odd[k] < hi:
         return False
     # whose record it is: the whole line and everything near, blank lines included
-    if _any_between(person, lo, hi):
+    if _any_between(person, lo, hi, reach):
         return False
     # a label for a number: the whole line and everything near within the paragraph
     blank = [m.end() for m in _BLANK_LINE.finditer(text, near_start, a)]
@@ -285,7 +300,7 @@ def _called_a_reference(text: str, a: int, b: int):
     blank = _BLANK_LINE.search(text, b, near_end)
     if blank:
         near_end = blank.start()
-    return not _any_between(identity, min(line_start, near_start), max(line_end, near_end))
+    return not _any_between(identity, min(line_start, near_start), max(line_end, near_end), reach)
 
 
 def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):

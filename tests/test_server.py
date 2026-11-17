@@ -301,7 +301,7 @@ def test_stands_alone():
     f"חשבונית מס, אסמכתא {FILE_NO}", f"שתי חשבוניות, אסמכתא {FILE_NO}", f"הבקשה עוסקת בהליך {FILE_NO}",
     f"ההחלטה ניתנה בדלתיים סגורות. זאת ועוד, בהליך {FILE_NO} נקבע דיון", f"המכתב נשלח. נפתח הליך {FILE_NO}",
     # direction marks are ordinary beside digits in Hebrew text
-    f"מספר הליך \u200f{FILE_NO}\u200f נדחה", f"\u202bמספר הליך {FILE_NO}\u202c",
+    f"מספר הליך \u200f{FILE_NO}\u200f נדחה", f"מספר הליך \u200e{FILE_NO} נדחה ב-5% (₪ 100, 20°)",
     # an identity word in another paragraph is out of reach
     f"ת.ז. של החייב {VALID_ID}\n\nמספר הליך {FILE_NO}",
 ])
@@ -360,6 +360,13 @@ def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(t
     # an invisible character with no place in prose: nothing is released near it, whatever it hides
     f"שלום\u200b רב, מספר הליך {FILE_NO}", f"מספר הליך {FILE_NO} נדחה\u2060 אתמול", f"שלום\u3164רב, מספר הליך {FILE_NO}",
     f"שלום\ufeffרב, הליך {FILE_NO}", f"דר\u034fכון, הליך {FILE_NO}", f"דרכו\ufe0fן, הליך {FILE_NO}",
+    # direction overrides, embeddings and isolates can make text read differently from how it is stored
+    f"\u202bמספר הליך {FILE_NO}\u202c", f"מספר הליך {FILE_NO} \u202eז.ת\u202c", f"\u2067מספר הליך {FILE_NO}\u2069",
+    # blank glyphs and other characters with no place in prose, also where a multi-word label is split by one
+    f"שלום\u2800רב, מספר הליך {FILE_NO}", f"ביטוח\u2800לאומי, הליך {FILE_NO}", f"מספר\u3164אישי, הליך {FILE_NO}", f"שלום \x07, הליך {FILE_NO}",
+    f"שלום \ue000, הליך {FILE_NO}", f"שלום 🙂, הליך {FILE_NO}",
+    # a label stretched with spaces beyond any fixed length still counts when it reaches into the searched text
+    "ביטוח" + " " * 400 + "לאומי\n" + f"מספר הליך {FILE_NO}", "מספר הליך " + FILE_NO + " " * 150 + "ביטוח" + " " * 300 + "לאומי",
     # a word that starts just outside the nearby text and reaches into it (the line break keeps it off the number's line)
     "מספר הזהות\n" + "א" * 284 + f" מספר הליך {FILE_NO}",
     # ... also when it describes another number: telling which number a label belongs to is where earlier versions leaked
