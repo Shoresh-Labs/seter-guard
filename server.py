@@ -4,6 +4,7 @@ Implements LiteLLM's Generic Guardrail API (POST /beta/litellm_basic_guardrail_a
 plus a plain /v1/redact endpoint. Runs fully on your own machine: no text leaves it.
 """
 import bisect, logging, os, re
+from collections import Counter
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
@@ -91,49 +92,68 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 #   - the model labelled it ID, and no window called it anything else, at any confidence, trusted or not;
 #   - it is exactly nine ASCII digits standing alone, not a piece of a longer number or code;
 #   - the check digit is wrong, so it is not a correctly written Israeli identity number;
-#   - the words directly before it are one of three Hebrew phrases (REFERENCE_BEFORE): "תיק הוצאה לפועל",
-#     "הליך" or "אסמכתא", optionally followed by "מספר", with nothing else between them and the number;
-#   - nothing on the line before it says whose record this is (PERSON_RECORD: a patient, an employee, a
-#     customer), and nothing names an identity, passport, licence or account number (IDENTITY_CUE) between
-#     the previous number on the line and this one;
-#   - and neither kind of word follows it: to the end of the line, or, when another number follows, to the
-#     end of the clause (a label after that belongs to the other number).
+#   - the words directly before it, on its line, are one of three Hebrew phrases (REFERENCE_BEFORE):
+#     "תיק הוצאה לפועל", "הליך" or "אסמכתא", optionally followed by "מספר";
+#   - the text around it (CONTEXT_BEFORE characters back and CONTEXT_AFTER on, not past a blank line) has
+#     no word that names an identity, passport, licence or account number (IDENTITY_CUE) and no word that
+#     says whose record this is (PERSON_RECORD);
+#   - and every other place where the same digits appear in the request is released too: one value gets
+#     one answer, so a number masked as "ת.ז." in one field is not printed in the next.
 # The narrowness is deliberate. A wrong check digit does not make a number harmless: the first eight digits
 # of an identity number determine the ninth, so one with a mistyped or misread last digit still discloses
 # the real one, and US social security numbers, many passport numbers and bank account numbers are nine
-# digits that fail the check nine times in ten. Wider rules were tried and each leaked: a bare "תיק" is also
-# a medical, tax or population-registry file whose number is the person's identity number, and English
-# "case", "file" and "reference" are ordinary words ("the number we have on file: ...", "tax file number").
+# digits that fail the check nine times in ten. Wider and cleverer rules were tried and each leaked: a bare
+# "תיק" is also a medical, tax or registry file numbered by the person's identity number; English "case",
+# "file" and "reference" are ordinary words; and deciding which of two numbers a nearby "ת.ז." describes
+# went wrong as soon as a date or a phone number stood between them. So an identity word anywhere nearby
+# keeps the number masked, even when it describes another number.
 #
 # Off by default: these are word lists, not understanding, and a guardrail that is unsure masks.
 IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
 _HE = "א-ת"
 _HE_PREFIX = "(?:ו?[בלהמשכ]{1,2})?"   # attached ב ל ה מ ש כ, also after ו; a bare ו is left out ("ותיק" is a veteran)
-_QUOTE = "[\"״”'׳.]"                  # the mark inside a Hebrew abbreviation: ת"ז, ת.ז, ת׳ז
+# An abbreviation starts a word (so "סגורות. זאת" is not ת.ז) and has one or two marks inside: ת"ז, ת''ז, ת.ז, ת“ז
+_ABBR = rf"(?<![{_HE}])[ובלהמשכ]{{0,2}}"
+_MARK = "[\"״”“„'׳.]{1,2}"
 # Bounded repeats only, and matched against the last REFERENCE_TAIL characters before the number: an open
 # "\s*" here backtracked for seconds on a long run of spaces.
 REFERENCE_TAIL = 80
+CONTEXT_BEFORE, CONTEXT_AFTER = 300, 200
 REFERENCE_BEFORE = re.compile(
     rf"(?<![{_HE}]){_HE_PREFIX}(?:תיק\s{{1,2}}ה?(?:הוצאה\s{{1,2}}לפועל|הוצל[\"״”]פ)|הליך|אסמכתא)"
     rf"(?:\s{{1,2}}(?:מספר|מס['׳.]?))?\s{{0,2}}:?\s{{0,2}}$")
+# Stems, so that every inflected form counts (דרכונו, חשבונך, עובדיו, לקוחותיה). Only look-alikes known to be
+# harmless are let through by name: חשבונית / חשבוניות (an invoice), עוסקת / עוסקים (deals with), and
+# עובדה / עובדות / עובדתי (a fact).
 IDENTITY_CUE = re.compile(
-    rf"ת{_QUOTE}\s*ז|מ{_QUOTE}\s*[זא]|ח{_QUOTE}\s*[ןנ]|(?<![{_HE}])תז(?![{_HE}])|זהות|זיהוי|מזהה|דרכו[ןנ]|רי?שיו[ןנ]"
-    rf"|חשבו[ןנ](?!י(?:ת|ות)(?![{_HE}]))|ח-ן|עוסק\s+(?:מורשה|פטור)|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים"
-    r"|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخصة|حساب"
-    r"|(?<![a-z])(?:ids?|i\.d|ssn|ss#|social|passport|licen[cs]e|account|acct|iban|identity|national|mrn|tax|medical|insurance"
-    r"|immigration|personnel|personal)(?![a-z])", re.IGNORECASE)
-# Stems, so that every inflected form counts (עובדיו, לקוחותיה, חשבונך, מטופלת). Only the look-alikes known to be
-# harmless are let through by name: חשבונית / חשבוניות (an invoice) above, עובדה / עובדות / עובדתי (a fact) here.
+    rf"{_ABBR}ת{_MARK}\s*ז|{_ABBR}מ{_MARK}\s*[זא]|{_ABBR}ח{_MARK}\s*[ןנ]|{_ABBR}ע{_MARK}\s*מ|(?<![{_HE}])תז(?![{_HE}])"
+    rf"|זהות|זיהוי|מזהה|תעודת|דרכו[ןנ]|פספורט|רי?שיו[ןנ]|חשבו[ןנ](?!י(?:ת|ות)(?![{_HE}]))|ח-ן|בנק|עוסק(?!(?:ת|ים|ות)(?![{_HE}]))"
+    r"|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخصة|حساب"
+    r"|(?<![a-z])(?:ids?|i\.d|t\.z|ssn|ss#|social|passports?|licen[cs]es?|accounts?|acct|iban|identity|national|mrn|tax|medical"
+    r"|insurance|immigration|personnel|personal|bank)(?![a-z])", re.IGNORECASE)
 PERSON_RECORD = re.compile(
-    rf"מטופל|חול(?:ה|ים|ת)|עובד(?!(?:ה|ות|תי(?:ת|ים|ות)?)(?![{_HE}]))|לקוח|תלמיד|סטודנט|مريض|موظف"
-    r"|(?<![a-z])(?:patient|employee|customer|passenger|student|taxpayer|member|user)(?![a-z])", re.IGNORECASE)
-_LONG_NUMBER = re.compile(r"\d[\d-]{3,}\d")           # five characters or more: another number on the line
-_CLAUSE_END = re.compile(r"[,;]|[.!?](?=\s|$)")
+    rf"מטופל|חול(?:ה|ים|ת|י)|עובד(?!(?:ה|ות|תי(?:ת|ים|ות)?)(?![{_HE}]))|לקוח|תלמיד|סטודנט|נוסע|מבוטח|משתמש|נישום|مريض|موظف"
+    r"|(?<![a-z])(?:patient|employee|customer|client|passenger|student|taxpayer|member|user)s?(?![a-z])", re.IGNORECASE)
+_BLANK_LINE = re.compile(r"\n[^\S\n]*\n")
+_NIQQUD = re.compile("[֑-ׇ]")
+_INVISIBLE = "‎‏‪‫‬‭‮⁦⁧⁨⁩﻿"   # direction marks around digits
+
+
+class _WhenNothingElseListens(logging.StreamHandler):
+    """Writes only while the root logger has no handler: uvicorn configures just its own loggers, and without
+    this the audit lines would go nowhere. A deployment that configures logging gets them through its own
+    handlers, once."""
+    def emit(self, record):
+        if not logging.getLogger().handlers:
+            super().emit(record)
+
+
 log = logging.getLogger("seter_guard")
-if not log.handlers:  # uvicorn configures only its own loggers; without this the audit lines would go nowhere
-    log.addHandler(logging.StreamHandler())
-    log.setLevel(logging.INFO)
-    log.propagate = False
+log.setLevel(logging.INFO)
+if not any(isinstance(h, _WhenNothingElseListens) for h in log.handlers):
+    _h = _WhenNothingElseListens()
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(_h)
 
 
 def il_id_check(number: str):
@@ -147,41 +167,61 @@ def il_id_check(number: str):
     return total % 10 == 0
 
 
+def _beyond(text: str, i: int, step: int):
+    """Walking from text[i] away from a number: (spaces before a separator, the separator, spaces after it,
+    the first other character). Spaces include direction marks; the separator is one character that is not
+    a letter or digit, "" when there is none."""
+    def skip(i):
+        n = 0
+        while 0 <= i < len(text) and (text[i].isspace() or text[i] in _INVISIBLE):
+            i, n = i + step, n + 1
+        return i, n
+    i, gap = skip(i)
+    ch = text[i] if 0 <= i < len(text) else ""
+    if not ch or ch.isalnum():
+        return gap, "", 0, ch
+    i, gap_after = skip(i + step)
+    return gap, ch, gap_after, text[i] if 0 <= i < len(text) else ""
+
+
 def _stands_alone(text: str, a: int, b: int):
     """The digits at text[a:b] are a whole number, not a piece of a longer number or code.
 
-    A letter or digit touching it makes it a piece (A034851272). So does a space with a digit beyond it
-    (034851272 21, a number written in groups), and any other character with a letter or digit beyond it
-    (12-034851272, 034851272/21, 034851272\\21, 034851272-A)."""
-    for near, far in ((text[a - 1:a], text[a - 2:a - 1]), (text[b:b + 1], text[b + 1:b + 2])):
-        if not near:
+    A piece: a letter or digit touching it (A034851272); a digit beyond spaces (034851272 21, a number written
+    in groups); a digit beyond one separator, with or without spaces (12-034851272, 034851272/21,
+    034851272 - 21, 034851272. 5); a letter joined by a separator with no space (034851272-A). The one
+    exception is a label's colon before the number (אסמכתא:034851272)."""
+    for start, step in ((a - 1, -1), (b, 1)):
+        gap, sep, gap_after, ch = _beyond(text, start, step)
+        if not ch.isalnum():
             continue
-        if near.isalnum() or (far.isdigit() if near.isspace() else far.isalnum()):
+        if ch.isdigit():
+            return False
+        if not sep and not gap:                                   # a letter touching the number
+            return False
+        if sep and not gap and not gap_after and not (step < 0 and sep == ":"):
             return False
     return True
 
 
 def _called_a_reference(text: str, a: int, b: int):
-    """The words directly before text[a:b] name an enforcement or proceeding number, and nothing around it
-    says whose record it is or names an identity, passport, licence or account number."""
+    """The words directly before text[a:b] name an enforcement or proceeding number, and the text around it
+    has no word about an identity, passport, licence or account number or about whose record it is."""
     line_start = text.rfind("\n", 0, a) + 1
-    line_end = text.find("\n", b)
-    before, after = text[line_start:a], text[b:len(text) if line_end < 0 else line_end]
-    if not REFERENCE_BEFORE.search(before[-REFERENCE_TAIL:]):
+    if not REFERENCE_BEFORE.search(text[max(line_start, a - REFERENCE_TAIL):a]):
         return False
-    # Whose record it is holds for the whole line. A label such as ת.ז. describes the number that follows it,
-    # so a label before an earlier number on the line is about that number, not this one.
-    earlier = [m.end() for m in _LONG_NUMBER.finditer(before)]
-    if PERSON_RECORD.search(before) or IDENTITY_CUE.search(before[earlier[-1] if earlier else 0:]):
-        return False
-    # A label can follow the number: "מספר הליך 034851272 (ת.ז. של החייב)", "... 034851272, שהוא מספר הזהות".
-    # Read to the end of the line. Only when another number follows is the clause the limit: in
-    # "מספר הליך 034851272, ת.ז. של החייב 034851279" the label after the comma belongs to the second number.
-    nxt = _LONG_NUMBER.search(after)
-    if nxt:
-        clause = _CLAUSE_END.search(after, 0, nxt.start())  # the full stops inside "ת.ז." are not followed by a space
-        after = after[:clause.start() if clause else nxt.start()]
-    return not (IDENTITY_CUE.search(after) or PERSON_RECORD.search(after))
+    start = max(0, a - CONTEXT_BEFORE)
+    while start > 0 and a - start < CONTEXT_BEFORE + 40 and not text[start - 1].isspace():
+        start -= 1                                                # do not begin in the middle of a word
+    before, after = text[start:a], text[b:b + CONTEXT_AFTER]
+    blank = [m.end() for m in _BLANK_LINE.finditer(before)]
+    if blank:
+        before = before[blank[-1]:]
+    blank = _BLANK_LINE.search(after)
+    if blank:
+        after = after[:blank.start()]
+    around = _NIQQUD.sub("", before + " " + after)
+    return not (IDENTITY_CUE.search(around) or PERSON_RECORD.search(around))
 
 
 def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
@@ -324,8 +364,8 @@ def entities(text: str):
     return out
 
 
-def scan(text: str):
-    """(spans to mask, spans detected but left in the text), each a list of (start, end, type)."""
+def _detect(text: str):
+    """(spans to mask, spans that may be left in the text), each a list of (start, end, type), for one text."""
     out = []  # [start, end, type, type_is_from_owner, another_type_was_reported]
     # (start, end, type) of what a window reported below MIN_SCORE or right next to a cut: never masked on that
     # evidence, but enough to stop a later check from releasing the span
@@ -360,9 +400,29 @@ def scan(text: str):
         # a weak second opinion counts too: if any window called part of this span something else, it stays masked
         mixed = mixed or any(x < b and a < y and u != t for x, y, u in doubts)
         (kept if releasable(text, a, b, t, mixed) else masked).append((a, b, t))
-    for a, b, t in kept:  # both endpoints pass through here; offsets only, never the digits
-        log.info("left unmasked by il_id_check: %s at characters %d-%d of a %d-character text", t, a, b, len(text))
     return masked, kept
+
+
+def scan_many(texts):
+    """[(spans to mask, spans detected but left in the text)] for the texts of one request.
+
+    One value gets one answer across the request. A number is left in a text only if every place where its
+    digits appear, in any of the texts, is being left too; otherwise the copy that was masked (or that the
+    model did not report) would be given away by the copy that was not."""
+    found = [_detect(t) for t in texts]
+    releasing = Counter(t[a:b] for t, (_m, kept) in zip(texts, found) for a, b, _ in kept)
+    appears = {v: sum(t.count(v) for t in texts) for v in releasing}
+    out = []
+    for text, (masked, kept) in zip(texts, found):
+        stay = [s for s in kept if appears[text[s[0]:s[1]]] == releasing[text[s[0]:s[1]]]]
+        out.append((sorted(masked + [s for s in kept if s not in stay]), stay))
+        for a, b, t in stay:  # both endpoints pass through here; position only, never the digits
+            log.info("left unmasked by il_id_check: %s at characters %d-%d of a %d-character text", t, a, b, len(text))
+    return out
+
+
+def scan(text: str):
+    return scan_many([text])[0]
 
 
 def spans(text: str):
@@ -415,8 +475,8 @@ def litellm_guardrail(body: GuardIn):
         return {"action": "BLOCKED", "blocked_reason": "Text too long to scan for personal data (Seter): "
                                                       f"{total} tokens in this request; the limit is SETER_MAX_TOKENS={MAX_TOKENS}"}
     masked, hit = [], False
-    for t in body.texts:
-        m, found = mask(t)
+    for t, (to_mask, _kept) in zip(body.texts, scan_many(body.texts)):  # together: one value, one answer
+        m, found = _render(t, to_mask)
         masked.append(m)
         hit = hit or bool(found)
     if not hit:

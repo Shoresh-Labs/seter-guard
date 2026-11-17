@@ -83,19 +83,20 @@ An Israeli identity number (Teudat Zehut) is nine digits, and the last one is a 
 - it is exactly nine digits standing alone, not part of a longer number or code;
 - its check digit is wrong;
 - the words directly before it are `תיק הוצאה לפועל` (or `תיק הוצל"פ`), `הליך` or `אסמכתא`, alone or with an attached ב, ל, ה, מ, ש, optionally followed by `מספר` or `מס'`;
-- nothing before it on the line says whose record it is (a patient, an employee, a customer), and nothing near it, before or after, names an identity, passport, licence or account number.
+- the text around it (about 300 characters before and 200 after, within the paragraph) has no word about an identity, passport, licence or account number, and no word that says whose record it is (a patient, an employee, a customer);
+- the same digits are not masked, or left unreported, anywhere else in the request.
 
 | Text | With the check on |
 |---|---|
 | `תיק הוצאה לפועל מספר 034851272 נפתח בלשכת חיפה.` | left as it is |
-| `מספר הליך 034851272, ת.ז. של החייב 034851279.` | proceeding number left, identity number masked |
 | `ת.ז. 034851272`, `מספר דרכון 034851272`, `SSN 123456789`, a bare `034851272` | masked |
 | `בתיק 034851272`, `תיק רפואי מספר 034851272`, `Case no. 034851272`, `Tax file number 123456789` | masked |
 | `מספר הליך 034851272 (ת.ז. של החייב)`, `החולה דני לוי, מספר הליך 034851272` | masked |
+| `מספר הליך 034851272, ת.ז. של החייב 034851279.` | both masked |
 
-The rule is narrow on purpose. A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check. A bare `תיק` is not enough either, because a medical, tax or population-registry file is numbered by the person's identity number, and English `case`, `file` and `reference` are ordinary words, so no English phrase releases a number.
+The rule is narrow on purpose. A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check. A bare `תיק` is not enough either, because a medical, tax or population-registry file is numbered by the person's identity number, and English `case`, `file` and `reference` are ordinary words, so no English phrase releases a number. An identity word nearby keeps the number masked even when it describes a different number, as in the last row: working out which number a label belongs to is where earlier versions of this rule went wrong.
 
-It is off by default. The rule is word lists (`REFERENCE_BEFORE`, `IDENTITY_CUE` and `PERSON_RECORD` in `server.py`), not understanding: an enforcement number described in other words stays masked, and a personal number that the text introduces only as a proceeding number, with none of the listed words near it, would be released. `GET /health` reports `il_id_check`. Every number left in the text this way is listed under `kept` by `/v1/redact` and written to the log (logger `seter_guard`: type and position, never the digits) on both endpoints.
+It is off by default. The rule is word lists (`REFERENCE_BEFORE`, `IDENTITY_CUE` and `PERSON_RECORD` in `server.py`), not understanding: an enforcement number described in other words stays masked, and a personal number that the text introduces only as a proceeding number, with none of the listed words near it, would be released. `GET /health` reports `il_id_check`. Every number left in the text this way is listed under `kept` by `/v1/redact` and written to the log on both endpoints (logger `seter_guard`: type and position, never the digits; it goes through your logging configuration, or to stderr with a timestamp when there is none).
 
 ## Accuracy
 
