@@ -3,8 +3,9 @@
 Implements LiteLLM's Generic Guardrail API (POST /beta/litellm_basic_guardrail_api)
 plus a plain /v1/redact endpoint. Runs fully on your own machine: no text leaves it.
 """
-import bisect, logging, os, re
+import bisect, logging, os, re, unicodedata
 from collections import Counter
+from functools import lru_cache
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
@@ -94,9 +95,11 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 #   - the check digit is wrong, so it is not a correctly written Israeli identity number;
 #   - the words directly before it, on its line, are one of three Hebrew phrases (REFERENCE_BEFORE):
 #     "תיק הוצאה לפועל", "הליך" or "אסמכתא", optionally followed by "מספר";
-#   - the text around it (CONTEXT_BEFORE characters back and CONTEXT_AFTER on, not past a blank line) has
-#     no word that names an identity, passport, licence or account number (IDENTITY_CUE) and no word that
-#     says whose record this is (PERSON_RECORD);
+#   - its whole line, and the text around it (CONTEXT_BEFORE characters back and CONTEXT_AFTER on), has no
+#     word that says whose record this is (PERSON_RECORD) and, within its paragraph, no word that names an
+#     identity, passport, licence or account number (IDENTITY_CUE); the words are looked for in the text
+#     with invisible characters and vowel points removed and compatibility forms folded, so that a word
+#     cannot be hidden from the lists while reading the same;
 #   - and every other place where the same digits appear in the request is released too: one value gets
 #     one answer, so a number masked as "ת.ז." in one field is not printed in the next.
 # The narrowness is deliberate. A wrong check digit does not make a number harmless: the first eight digits
@@ -204,24 +207,50 @@ def _stands_alone(text: str, a: int, b: int):
     return True
 
 
+@lru_cache(maxsize=8)
+def _cue_positions(text: str):
+    """(where identity words start, where person words start) in `text`, each a sorted list, found once per text.
+
+    The words are searched in a cleaned copy: format characters (direction marks, zero-width characters, soft
+    hyphens) and Hebrew points removed, compatibility forms folded (NFKC), so "ת‏.ז" and "ｐａｓｓｐｏｒｔ"
+    are found. Positions are mapped back to the original text."""
+    chars, origin = [], []
+    for i, ch in enumerate(text):
+        if unicodedata.category(ch) == "Cf" or _NIQQUD.match(ch):
+            continue
+        for c in unicodedata.normalize("NFKC", ch):
+            chars.append(c)
+            origin.append(i)
+    clean = "".join(chars)
+    return tuple([origin[m.start()] for m in rx.finditer(clean)] for rx in (IDENTITY_CUE, PERSON_RECORD))
+
+
+def _any_between(positions, lo, hi):
+    k = bisect.bisect_left(positions, lo)
+    return k < len(positions) and positions[k] < hi
+
+
 def _called_a_reference(text: str, a: int, b: int):
     """The words directly before text[a:b] name an enforcement or proceeding number, and the text around it
     has no word about an identity, passport, licence or account number or about whose record it is."""
     line_start = text.rfind("\n", 0, a) + 1
     if not REFERENCE_BEFORE.search(text[max(line_start, a - REFERENCE_TAIL):a]):
         return False
-    start = max(0, a - CONTEXT_BEFORE)
-    while start > 0 and a - start < CONTEXT_BEFORE + 40 and not text[start - 1].isspace():
-        start -= 1                                                # do not begin in the middle of a word
-    before, after = text[start:a], text[b:b + CONTEXT_AFTER]
-    blank = [m.end() for m in _BLANK_LINE.finditer(before)]
+    line_end = text.find("\n", b)
+    line_end = len(text) if line_end < 0 else line_end
+    near_start, near_end = max(0, a - CONTEXT_BEFORE), min(len(text), b + CONTEXT_AFTER)
+    identity, person = _cue_positions(text)
+    # whose record it is: the whole line and everything near, blank lines included
+    if _any_between(person, min(line_start, near_start), max(line_end, near_end)):
+        return False
+    # a label for a number: the whole line and everything near within the paragraph
+    blank = [m.end() for m in _BLANK_LINE.finditer(text, near_start, a)]
     if blank:
-        before = before[blank[-1]:]
-    blank = _BLANK_LINE.search(after)
+        near_start = blank[-1]
+    blank = _BLANK_LINE.search(text, b, near_end)
     if blank:
-        after = after[:blank.start()]
-    around = _NIQQUD.sub("", before + " " + after)
-    return not (IDENTITY_CUE.search(around) or PERSON_RECORD.search(around))
+        near_end = blank.start()
+    return not _any_between(identity, min(line_start, near_start), max(line_end, near_end))
 
 
 def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):

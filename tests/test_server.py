@@ -347,6 +347,12 @@ def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(t
     f"ת''ז החייב בהליך {FILE_NO}", f"ת“ז החייב בהליך {FILE_NO}", f"מספר הזֶהוּת, הליך {FILE_NO}", f"מספר הפספורט שלו, הליך {FILE_NO}",
     f"מספר עוסק של הספק, אסמכתא {FILE_NO}", f"ע.מ. של הספק, אסמכתא {FILE_NO}", f"תעודת עולה, הליך {FILE_NO}", f"מספר הבנק שלו, אסמכתא {FILE_NO}",
     f"T.Z., הליך {FILE_NO}", f"passports, הליך {FILE_NO}",
+    # far back on a long line, and whose record it is even across a blank line
+    f"מספר תעודת הזהות של החייב " + "ועוד ועוד " * 200 + f"מספר הליך {FILE_NO}", f"מספר הליך {FILE_NO} " + "ועוד ועוד " * 200 + "(ת.ז. של החייב)",
+    f"פרטי המטופל דני לוי\n\nמספר הליך {FILE_NO}", "המטופל דני לוי " + "ועוד ועוד " * 200 + f"מספר הליך {FILE_NO}",
+    # a word hidden from the lists by an invisible character, a soft hyphen, vowel points or full-width letters
+    f"ת\u200f.ז. של החייב, מספר הליך {FILE_NO}", f"דר\u200dכון, הליך {FILE_NO}", f"pass\u00adport, הליך {FILE_NO}",
+    f"ｐａｓｓｐｏｒｔ, הליך {FILE_NO}", f"מְטוּפָּל, הליך {FILE_NO}", f"מספר הליך {FILE_NO} (ת\u2060.ז.)",
     # ... also when it describes another number: telling which number a label belongs to is where earlier versions leaked
     f"מספר הליך {FILE_NO}, ת.ז. של החייב {VALID_ID}.", f"ת.ז. של החייב {VALID_ID}, מספר הליך {FILE_NO}",
     # the label comes after the number
