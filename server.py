@@ -214,19 +214,22 @@ _FILLERS = set("͏ᅟᅠ឴឵᠋᠌᠍᠎᠏⠀ㅤﾠ")
 
 def _is_odd(ch: str):
     """A character with no ordinary use in Hebrew, Arabic or English prose. Allowed: letters, digits, marks,
-    punctuation, whitespace, the three direction marks, and symbols except pictographic ones (U+2000 and up,
-    where blank glyphs such as U+2800 live). Everything else is odd: other format characters (zero-width
+    punctuation, spaces, tab and line breaks, the three direction marks, and symbols except pictographic ones
+    (U+2000 and up, where blank glyphs such as U+2800 live) and ones that fold into a space or a mark. Everything else is odd: other format characters (zero-width
     characters, soft hyphens, direction overrides, embeddings and isolates, which can make text read
     differently from how it is stored), control characters, fillers, private-use and unassigned code points.
     Nothing is released near an odd character."""
     if ch in _FILLERS:
         return True
-    if ch in _BIDI or ch.isspace():
+    if ch in _BIDI or ch in "\t\n\r\v\f":
         return False
     category = unicodedata.category(ch)
-    if category[0] in "LNMP":
+    if category[0] in "LNMPZ":   # Z: spaces and line separators; other control characters are not whitespace here
         return False
-    return not (category in ("Sm", "Sc", "Sk") or (category == "So" and ord(ch) < 0x2000))
+    if not (category in ("Sm", "Sc", "Sk") or (category == "So" and ord(ch) < 0x2000)):
+        return True
+    # a symbol that folds into a space or a combining mark (´ becomes space + accent) would put a gap inside a word
+    return any(c.isspace() or unicodedata.category(c)[0] == "M" for c in unicodedata.normalize("NFKC", ch))
 
 
 @lru_cache(maxsize=8)
@@ -246,9 +249,10 @@ def _cue_positions(text: str):
             odd.append(i)
         for c in unicodedata.normalize("NFKC", ch):
             category = unicodedata.category(c)
-            if category in ("Mn", "Me"):
+            if category[0] == "M":   # all marks, spacing ones included
                 continue
-            hidden = category == "Cf" or c in _FILLERS
+            # hidden: shows nothing, or is a space that folding made out of something that was not one
+            hidden = category == "Cf" or c in _FILLERS or (c.isspace() and not ch.isspace())
             origin.append(i)
             joined.append("" if hidden else c)
             spaced.append(" " if hidden else c)

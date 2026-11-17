@@ -301,7 +301,7 @@ def test_stands_alone():
     f"חשבונית מס, אסמכתא {FILE_NO}", f"שתי חשבוניות, אסמכתא {FILE_NO}", f"הבקשה עוסקת בהליך {FILE_NO}",
     f"ההחלטה ניתנה בדלתיים סגורות. זאת ועוד, בהליך {FILE_NO} נקבע דיון", f"המכתב נשלח. נפתח הליך {FILE_NO}",
     # direction marks are ordinary beside digits in Hebrew text
-    f"מספר הליך \u200f{FILE_NO}\u200f נדחה", f"מספר הליך \u200e{FILE_NO} נדחה ב-5% (₪ 100, 20°)",
+    f"מספר הליך \u200f{FILE_NO}\u200f נדחה", f"מספר הליך \u200e{FILE_NO} נדחה ב-5% (₪ 100, 20°)", f"מספר\u00a0הליך {FILE_NO}\tנדחה",
     # an identity word in another paragraph is out of reach
     f"ת.ז. של החייב {VALID_ID}\n\nמספר הליך {FILE_NO}",
 ])
@@ -365,6 +365,9 @@ def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(t
     # blank glyphs and other characters with no place in prose, also where a multi-word label is split by one
     f"שלום\u2800רב, מספר הליך {FILE_NO}", f"ביטוח\u2800לאומי, הליך {FILE_NO}", f"מספר\u3164אישי, הליך {FILE_NO}", f"שלום \x07, הליך {FILE_NO}",
     f"שלום \ue000, הליך {FILE_NO}", f"שלום 🙂, הליך {FILE_NO}",
+    # control characters that Python counts as whitespace, and symbols that fold into a space plus an accent
+    f"שלום\x1cרב, מספר הליך {FILE_NO}", f"שלום\x85רב, הליך {FILE_NO}", f"דר\u00b4כון, הליך {FILE_NO}", f"דר\u00a8כון, הליך {FILE_NO}",
+    f"דר\u0903כון, הליך {FILE_NO}",
     # a label stretched with spaces beyond any fixed length still counts when it reaches into the searched text
     "ביטוח" + " " * 400 + "לאומי\n" + f"מספר הליך {FILE_NO}", "מספר הליך " + FILE_NO + " " * 150 + "ביטוח" + " " * 300 + "לאומי",
     # a word that starts just outside the nearby text and reaches into it (the line break keeps it off the number's line)
