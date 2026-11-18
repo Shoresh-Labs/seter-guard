@@ -3,7 +3,9 @@
 Implements LiteLLM's Generic Guardrail API (POST /beta/litellm_basic_guardrail_api)
 plus a plain /v1/redact endpoint. Runs fully on your own machine: no text leaves it.
 """
-import bisect, os, re
+import bisect, logging, os, re, unicodedata
+from collections import Counter
+from functools import lru_cache
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
@@ -16,6 +18,16 @@ DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1.1"
 # resolves to anything else the server refuses to start instead of running weights nobody chose.
 DEFAULT_COMMIT = "170f528e2aeb93e25b71300bb535a583d640e9f7"
 _REPO_ID = re.compile(r"^[\w.-]+(/[\w.-]+)?$")
+
+
+def _flag(name, strict=True):
+    """An on/off environment variable. An unrecognised value stops the server, or counts as off when not strict."""
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("1", "true", "on", "yes"):
+        return True
+    if strict and value not in ("", "0", "false", "off", "no"):
+        raise ValueError(f"{name}={value!r}: use 1 or 0")
+    return False
 
 
 def parse_model(value: str):
@@ -51,7 +63,7 @@ def resolve_commit(model, revision, is_local):
         path = hf_hub_download(model, "config.json", revision=revision)
     except Exception as e:  # noqa: BLE001 - re-raised with what the operator needs to know
         hint = ""
-        if os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes", "on"):
+        if _flag("HF_HUB_OFFLINE", strict=False):
             baked = os.environ.get("SETER_BAKED_MODEL")
             hint = (" This process is offline (HF_HUB_OFFLINE=1) and can only load what is already downloaded"
                     + (f": this image was built with SETER_MODEL={baked}" if baked else "")
@@ -73,6 +85,249 @@ TAGS = {"private_person": "PERSON", "private_address": "ADDRESS", "private_phone
         "private_email": "EMAIL", "account_number": "ID"}
 MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
+
+
+# ---- Israeli identity numbers ------------------------------------------------------------------------
+# An Israeli identity number (Teudat Zehut) is nine digits whose last digit is a check digit. The model
+# cannot do that arithmetic, and its account_number class ("ID" here) covers identity, passport, licence
+# and bank account numbers alike, so a nine-digit enforcement or proceeding number is masked as one of them.
+#
+# With SETER_IL_ID_CHECK=1 such a number is left in the text, but only when all of this holds:
+#   - the model labelled it ID, and no window called it anything else, at any confidence, trusted or not;
+#   - it is exactly nine ASCII digits standing alone, not a piece of a longer number or code;
+#   - the check digit is wrong, so it is not a correctly written Israeli identity number;
+#   - the words directly before it, on its line, are one of three Hebrew phrases (REFERENCE_BEFORE):
+#     "תיק הוצאה לפועל", "הליך" or "אסמכתא", optionally followed by "מספר";
+#   - its whole line, and the text around it (CONTEXT_BEFORE characters back and CONTEXT_AFTER on), has no
+#     word that says whose record this is (PERSON_RECORD) and, within its paragraph, no word that names an
+#     identity, passport, licence or account number (IDENTITY_CUE); the words are looked for in the text
+#     with invisible characters and vowel points removed and compatibility forms folded, so that a word
+#     cannot be hidden from the lists while reading the same;
+#   - and every other place where the same digits appear in the request is released too: one value gets
+#     one answer, so a number masked as "ת.ז." in one field is not printed in the next.
+# The narrowness is deliberate. A wrong check digit does not make a number harmless: the first eight digits
+# of an identity number determine the ninth, so one with a mistyped or misread last digit still discloses
+# the real one, and US social security numbers, many passport numbers and bank account numbers are nine
+# digits that fail the check nine times in ten. Wider and cleverer rules were tried and each leaked: a bare
+# "תיק" is also a medical, tax or registry file numbered by the person's identity number; English "case",
+# "file" and "reference" are ordinary words; and deciding which of two numbers a nearby "ת.ז." describes
+# went wrong as soon as a date or a phone number stood between them. So an identity word anywhere nearby
+# keeps the number masked, even when it describes another number.
+#
+# Off by default: these are word lists, not understanding, and a guardrail that is unsure masks.
+IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
+_HE = "א-ת"
+_HE_PREFIX = "(?:ו?[בלהמשכ]{1,2})?"   # attached ב ל ה מ ש כ, also after ו; a bare ו is left out ("ותיק" is a veteran)
+# An abbreviation starts a word (so "סגורות. זאת" is not ת.ז) and has one or two marks inside: ת"ז, ת''ז, ת.ז, ת“ז, ת’ז.
+# The identity abbreviation is also written with no mark, with a hyphen, a slash or a space (התז, ת-ז, ת/ז, ת ז);
+# those count when the ז ends the word, so "בת זוג" does not.
+_ABBR = rf"(?<![{_HE}])[ובלהמשכ]{{0,2}}"
+_MARK = "[\"״”“„'׳.’‘‚`]{1,2}"
+# Bounded repeats only, and matched against the last REFERENCE_TAIL characters before the number: an open
+# "\s*" here backtracked for seconds on a long run of spaces.
+REFERENCE_TAIL = 80
+CONTEXT_BEFORE, CONTEXT_AFTER = 300, 200
+REFERENCE_BEFORE = re.compile(
+    rf"(?<![{_HE}]){_HE_PREFIX}(?:תיק\s{{1,2}}ה?(?:הוצאה\s{{1,2}}לפועל|הוצל[\"״”]פ)|הליך|אסמכתא)"
+    rf"(?:\s{{1,2}}(?:מספר|מס['׳.]?))?\s{{0,2}}:?\s{{0,2}}$")
+# Stems, so that every inflected form counts (דרכונו, חשבונך, עובדיו, לקוחותיה). Only look-alikes known to be
+# harmless are let through by name: חשבונית / חשבוניות (an invoice), עוסקת / עוסקים (deals with),
+# עובדה / עובדות / עובדתי (a fact), and חברה / חברת / חברות (a company).
+IDENTITY_CUE = re.compile(
+    rf"{_ABBR}ת(?:{_MARK}\s*ז|[-–־/ ]?ז(?![{_HE}]))|{_ABBR}מ{_MARK}\s*[זא]|{_ABBR}ח{_MARK}\s*[ןנ]|{_ABBR}ע{_MARK}\s*מ"
+    rf"|זהות|זיהוי|מזהה|תעודת|דרכו[ןנ]|פספורט|רי?שיו[ןנ]|חשבו[ןנ](?!י(?:ת|ות)(?![{_HE}]))|ח-ן|בנק|עוסק(?!(?:ת|ים|ות)(?![{_HE}]))"
+    r"|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخص[ةه]|حساب|بطاق[ةه]|ضريب|تأمين"
+    # English: short words need a word boundary (camelCase counts as one, see _cue_positions); longer ones count
+    # wherever they appear, so that "bankaccount" and "taxid" do
+    r"|(?<![a-z])(?:ids?|i\.d|t\.z|ssn|ss#|mrn)(?![a-z])"
+    r"|social|passport|licen[cs]e|account|acct|iban|identity|national|tax|medical|insurance|immigration|personnel|personal|bank",
+    re.IGNORECASE)
+PERSON_RECORD = re.compile(
+    rf"מטופל|חול(?:ה|ים|ת|י)|עובד(?!(?:ה|ות|תי(?:ת|ים|ות)?)(?![{_HE}]))|לקוח|תלמיד|סטודנט|נוסע|מבוטח|משתמש|נישום"
+    rf"|מנוי|תושב|אזרח|חבר(?!(?:ה|ת|ות)(?![{_HE}]))"
+    r"|مريض|مرضى|موظف|عميل|عملاء|زبون|زبائن|طالب|طلاب|مسافر|مستخدم|عضو|أعضاء|مواطن|مؤمن"
+    # English: a word may run on (patientName, customers) but must start one, so "December" is not a member
+    r"|(?<![a-z])(?:patient|employee|customer|client|passenger|student|taxpayer|member|user)", re.IGNORECASE)
+_BLANK_LINE = re.compile(r"\n[^\S\n]*\n")
+_BIDI = frozenset("\u200e\u200f\u061c")   # left-to-right, right-to-left and Arabic letter marks: ordinary beside digits
+_TATWEEL = "\u0640"                         # stretches an Arabic word without changing it
+
+
+class _WhenNothingElseListens(logging.StreamHandler):
+    """Writes only while the root logger has no handler: uvicorn configures just its own loggers, and without
+    this the audit lines would go nowhere. A deployment that configures logging gets them through its own
+    handlers, once."""
+    def emit(self, record):
+        if not logging.getLogger().handlers:
+            super().emit(record)
+
+
+log = logging.getLogger("seter_guard")
+log.setLevel(logging.INFO)
+if not any(isinstance(h, _WhenNothingElseListens) for h in log.handlers):
+    _h = _WhenNothingElseListens()
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(_h)
+
+
+def il_id_check(number: str):
+    """True or False for nine ASCII digits (does the check digit match?), None for anything else."""
+    if len(number) != 9 or not (number.isascii() and number.isdigit()):
+        return None
+    total = 0
+    for i, ch in enumerate(number):
+        d = int(ch) * (1 + i % 2)
+        total += d if d < 10 else d - 9
+    return total % 10 == 0
+
+
+STANDS_ALONE_REACH = 64
+
+
+def _stands_alone(text: str, a: int, b: int):
+    """The digits at text[a:b] are a whole number, not a piece of a longer number or code.
+
+    Looking outward from each end, past spaces, line breaks, direction marks and punctuation, to the first
+    letter or digit. A digit there makes this a piece (034851272 21, 12-034851272, 034851272/21,
+    034851272 - 21, 034851272--21, 034851272, 2024): a number written in groups cannot be told from a number
+    followed by another one, so a date or a clause number right after it also keeps it masked. A letter makes it
+    a piece when nothing but punctuation, or nothing at all, separates them (A034851272, 034851272-A); the one
+    exception is a label's colon before the number (אסמכתא:034851272). More than STANDS_ALONE_REACH characters
+    of spaces and punctuation: not judged, so not alone."""
+    for i, step in ((a - 1, -1), (b, 1)):
+        between, spaced = "", False
+        while 0 <= i < len(text) and not text[i].isalnum():
+            if text[i].isspace() or text[i] in _BIDI:
+                spaced = True
+            else:
+                between += text[i]
+            if len(between) > STANDS_ALONE_REACH or abs(i - (a if step < 0 else b)) > 4 * STANDS_ALONE_REACH:
+                return False
+            i += step
+        if not 0 <= i < len(text):
+            continue
+        if text[i].isdigit():
+            return False
+        if not spaced and not (step < 0 and between == ":"):       # a letter touching the number or joined to it
+            return False
+    return True
+
+
+# Letters by category that show nothing (Hangul and other fillers); everything else odd is caught by category.
+_FILLERS = set("͏ᅟᅠ឴឵᠋᠌᠍᠎᠏⠀ㅤﾠ")
+
+
+def _is_odd(ch: str):
+    """A character with no ordinary use in Hebrew, Arabic or English prose. Allowed: letters, digits, marks,
+    punctuation, spaces, tab and line breaks, the three direction marks, and symbols except pictographic ones
+    (U+2000 and up, where blank glyphs such as U+2800 live) and ones that fold into a space or a mark. Everything else is odd: other format characters (zero-width
+    characters, soft hyphens, direction overrides, embeddings and isolates, which can make text read
+    differently from how it is stored), control characters, fillers, private-use and unassigned code points.
+    Nothing is released near an odd character."""
+    if ch in _FILLERS:
+        return True
+    if ch in _BIDI or ch in "\t\n\r\v\f":
+        return False
+    category = unicodedata.category(ch)
+    if category == "Mc":         # a spacing mark takes up room like a letter, and none belongs to Hebrew, Arabic or Latin
+        return True
+    if category[0] in "LNMPZ":   # Z: spaces and line separators; other control characters are not whitespace here
+        return False
+    if not (category in ("Sm", "Sc", "Sk") or (category == "So" and ord(ch) < 0x2000)):
+        return True
+    # a symbol that folds into a space or a combining mark (´ becomes space + accent) would put a gap inside a word
+    return any(c.isspace() or unicodedata.category(c)[0] == "M" for c in unicodedata.normalize("NFKC", ch))
+
+
+@lru_cache(maxsize=8)
+def _cue_positions(text: str):
+    """(identity words, person words, odd characters, reach) in `text`, found once per text: the first two are
+    sorted lists of (start, end) in the original text, the third a sorted list of positions, the last the
+    length of the longest word found.
+
+    The words are searched in cleaned copies of the text: compatibility forms folded (NFKC, so full-width
+    letters and presentation forms read as plain ones), marks removed (Hebrew points, combining characters,
+    variation selectors), and format characters and fillers either removed or turned into a space. Both
+    readings are searched and a word found in either counts, so cleaning can only add words, never hide
+    one: removing joins "דר|כון", a space keeps "של|ת.ז" apart."""
+    joined, spaced, origin, odd = [], [], [], []
+    for i, ch in enumerate(text):
+        if _is_odd(ch):
+            odd.append(i)
+        for c in unicodedata.normalize("NFKC", ch):
+            category = unicodedata.category(c)
+            if category in ("Mn", "Me"):   # marks that sit on a letter: gone in both readings
+                continue
+            # hidden: shows nothing, is a spacing mark, or is a space that folding made out of something that was
+            # not one. Removed in one reading and a space in the other, so it can neither split nor join a word.
+            hidden = category in ("Cf", "Mc") or c in _FILLERS or c == _TATWEEL or (c.isspace() and not ch.isspace())
+            # customerId, IDNumber: a capital after a small letter, or before one, starts a word in the spaced reading
+            if c.isupper() and spaced and spaced[-1].isalpha() and (spaced[-1].islower() or text[i + 1:i + 2].islower()):
+                origin.append(i)
+                joined.append("")
+                spaced.append(" ")
+            origin.append(i)
+            joined.append("" if hidden else c)
+            spaced.append(" " if hidden else c)
+    # `spaced` has one character per entry of origin; `joined` needs its own map because entries vanish
+    joined_origin = [o for o, c in zip(origin, joined) if c]
+    found = []
+    for rx in (IDENTITY_CUE, PERSON_RECORD):
+        spans = {(origin[m.start()], origin[m.end() - 1] + 1) for m in rx.finditer("".join(spaced))}
+        spans |= {(joined_origin[m.start()], joined_origin[m.end() - 1] + 1) for m in rx.finditer("".join(joined))}
+        found.append(sorted(spans))
+    reach = max((e - s for spans in found for s, e in spans), default=0)
+    return found[0], found[1], odd, reach
+
+
+def _any_between(spans, lo, hi, reach):
+    """Some (start, end) in the sorted list overlaps [lo, hi): a word that begins before lo and reaches into
+    the range counts. `reach` is the longest word in the text, so no such word begins before lo - reach."""
+    k = bisect.bisect_left(spans, (lo - reach, 0))
+    while k < len(spans) and spans[k][0] < hi:
+        if spans[k][1] > lo:
+            return True
+        k += 1
+    return False
+
+
+def _called_a_reference(text: str, a: int, b: int):
+    """The words directly before text[a:b] name an enforcement or proceeding number, and the text around it
+    has no word about an identity, passport, licence or account number or about whose record it is."""
+    line_start = text.rfind("\n", 0, a) + 1
+    # direction marks beside the digits and marks on a letter are taken out first: with a vowel point after its
+    # ת, "בתְהליך" (in the process) would otherwise read as ב + ת + "הליך"
+    tail = "".join(c for c in text[max(line_start, a - REFERENCE_TAIL):a]
+                   if c not in _BIDI and unicodedata.category(c) not in ("Mn", "Me"))
+    if not REFERENCE_BEFORE.search(tail):
+        return False
+    line_end = text.find("\n", b)
+    line_end = len(text) if line_end < 0 else line_end
+    near_start, near_end = max(0, a - CONTEXT_BEFORE), min(len(text), b + CONTEXT_AFTER)
+    identity, person, odd, reach = _cue_positions(text)
+    lo, hi = min(line_start, near_start), max(line_end, near_end)
+    # a character with no business in prose (see _is_odd): something may be hidden, so nothing is released
+    k = bisect.bisect_left(odd, lo)
+    if k < len(odd) and odd[k] < hi:
+        return False
+    # whose record it is: the whole line and everything near, blank lines included
+    if _any_between(person, lo, hi, reach):
+        return False
+    # a label for a number: the whole line and everything near within the paragraph
+    blank = [m.end() for m in _BLANK_LINE.finditer(text, near_start, a)]
+    if blank:
+        near_start = blank[-1]
+    blank = _BLANK_LINE.search(text, b, near_end)
+    if blank:
+        near_end = blank.start()
+    return not _any_between(identity, min(line_start, near_start), max(line_end, near_end), reach)
+
+
+def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
+    """A detected span to leave in the text (see the conditions above). False whenever in doubt."""
+    return (IL_ID_CHECK and t == "ID" and not other_type_seen and il_id_check(text[a:b]) is False
+            and _stands_alone(text, a, b) and _called_a_reference(text, a, b))
+
 
 ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
@@ -203,42 +458,103 @@ def entities(text: str):
             # reaches into the trusted zone, so a long entity that begins just after a cut is never lost.
             if s < t and t > trust_from and s < trust_to:
                 out.append({**e, "start": s, "end": t, "owner": own_from <= s < own_to})
+            elif s < t:  # not used for masking, but kept as a second opinion (see scan)
+                out.append({**e, "start": s, "end": t, "owner": False, "untrusted": True})
     return out
 
 
-def spans(text: str):
-    out = []  # [start, end, type, type_is_from_owner]
+def _detect(text: str):
+    """(spans to mask, spans that may be left in the text), each a list of (start, end, type), for one text."""
+    out = []  # [start, end, type, type_is_from_owner, another_type_was_reported]
+    # (start, end, type) of what a window reported below MIN_SCORE or right next to a cut: never masked on that
+    # evidence, but enough to stop a later check from releasing the span
+    doubts = []
     for e in sorted(entities(text), key=lambda e: (e["start"], not e["owner"], -e["end"])):
-        if e["score"] < MIN_SCORE:
+        if e["score"] < MIN_SCORE or e.get("untrusted"):
+            doubts.append((e["start"], e["end"], TAGS.get(e["entity_group"], "PII")))
             continue
         a, b, t = e["start"], e["end"], TAGS.get(e["entity_group"], "PII")
         while a < b and text[a].isspace():
             a += 1
         if a >= b:
             continue
+        # The model sometimes reports only some digits of a number ("[ID]3485[ID]2"). A number is masked whole.
+        while a > 0 and text[a].isdigit() and text[a - 1].isdigit():
+            a -= 1
+        while b < len(text) and text[b - 1].isdigit() and text[b].isdigit():
+            b += 1
         last = out[-1] if out else None
         if last and a < last[1]:
             # the same stretch reported by two windows: mask the union (when in doubt, mask); the type comes from
             # the window that owns the text, whichever of the two spans starts first
             last[1] = max(last[1], b)
+            if t != last[2]:
+                last[4] = True  # the windows disagree: such a span is never released by a later check
             if e["owner"] and not last[3]:
                 last[2], last[3] = t, True
         # merge neighbours of the same type separated only by whitespace (e.g. أبو خالد)
         elif last and last[2] == t and text[last[1]:a].strip() == "":
             last[1] = b
         else:
-            out.append([a, b, t, e["owner"]])
-    return [(a, b, t) for a, b, t, _ in out]
+            out.append([a, b, t, e["owner"], False])
+    # Judged after merging, so that two numbers the model joined into one span are seen as what they are: not
+    # a single nine-digit number, and therefore masked.
+    masked, kept = [], []
+    for a, b, t, _owner, mixed in out:
+        # a weak second opinion counts too: if any window called part of this span something else, it stays masked
+        mixed = mixed or any(x < b and a < y and u != t for x, y, u in doubts)
+        (kept if releasable(text, a, b, t, mixed) else masked).append((a, b, t))
+    return masked, kept
 
 
-def mask(text: str):
+def _digits(text: str):
+    """Only the digits of `text`, as ASCII: what is left of a number however it is written (03485127-2,
+    0348 51272, with a direction mark inside, in full-width or Arabic-Indic digits)."""
+    return "".join(str(unicodedata.digit(c)) for c in text if c.isdigit() and unicodedata.digit(c, None) is not None)
+
+
+def scan_many(texts):
+    """[(spans to mask, spans detected but left in the text)] for the texts of one request.
+
+    One value gets one answer across the request. A number is left in a text only if every place where its
+    digits appear, in any of the texts, is being left too; otherwise the copy that was masked (or that the
+    model did not report) would be given away by the copy that was not. Copies are compared by their digits
+    alone and without leading zeros, so a hyphen, a space or a dropped zero does not make them different
+    numbers. Digits that only happen to line up across two other numbers count as a copy too: that masks."""
+    found = [_detect(t) for t in texts]
+    key = lambda text, s: text[s[0]:s[1]].lstrip("0") or "0"
+    releasing = Counter(key(t, s) for t, (_m, kept) in zip(texts, found) for s in kept)
+    digits = [_digits(t) for t in texts] if releasing else []
+    appears = {v: sum(d.count(v) for d in digits) for v in releasing}
+    out = []
+    for text, (masked, kept) in zip(texts, found):
+        stay = [s for s in kept if appears[key(text, s)] == releasing[key(text, s)]]
+        out.append((sorted(masked + [s for s in kept if s not in stay]), stay))
+        for a, b, t in stay:  # both endpoints pass through here; position only, never the digits
+            log.info("left unmasked by il_id_check: %s at characters %d-%d of a %d-character text", t, a, b, len(text))
+    return out
+
+
+def scan(text: str):
+    return scan_many([text])[0]
+
+
+def spans(text: str):
+    return scan(text)[0]
+
+
+def _render(text: str, to_mask):
     res, pos, found = [], 0, []
-    for a, b, t in spans(text):
+    for a, b, t in to_mask:
         res += [text[pos:a], f"[{t}]"]
         found.append({"type": t, "start": a, "end": b})
         pos = b
     res.append(text[pos:])
     return "".join(res), found
+
+
+def mask(text: str):
+    return _render(text, spans(text))
 
 
 class RedactIn(BaseModel):
@@ -248,10 +564,13 @@ class RedactIn(BaseModel):
 @app.post("/v1/redact")
 def redact(body: RedactIn):
     try:
-        masked, found = mask(body.text)
+        to_mask, kept = scan(body.text)
     except TextTooLong as e:  # never return text that was not read
         raise HTTPException(status_code=413, detail=str(e))
-    return {"text": masked, "entities": found}
+    masked, found = _render(body.text, to_mask)
+    # kept: detected and deliberately left in the text, so a log can tell that from "nothing found"
+    return {"text": masked, "entities": found,
+            "kept": [{"type": t, "start": a, "end": b, "reason": "il_id_check"} for a, b, t in kept]}
 
 
 class GuardIn(BaseModel):
@@ -270,8 +589,8 @@ def litellm_guardrail(body: GuardIn):
         return {"action": "BLOCKED", "blocked_reason": "Text too long to scan for personal data (Seter): "
                                                       f"{total} tokens in this request; the limit is SETER_MAX_TOKENS={MAX_TOKENS}"}
     masked, hit = [], False
-    for t in body.texts:
-        m, found = mask(t)
+    for t, (to_mask, _kept) in zip(body.texts, scan_many(body.texts)):  # together: one value, one answer
+        m, found = _render(t, to_mask)
         masked.append(m)
         hit = hit or bool(found)
     if not hit:
@@ -285,4 +604,4 @@ def litellm_guardrail(body: GuardIn):
 def health():
     # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
     return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
-            "revision": REVISION, "commit": COMMIT}
+            "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK}

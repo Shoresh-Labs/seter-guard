@@ -77,6 +77,33 @@ Texts that fit in one window take a single model call, as before.
 
 **Use fast `v1.1.1`, not `v1.1`, with transformers 4.x.** The two have the same weights. `v1.1` has a `config.json` that transformers 4.x misreads without any warning, which makes the model miss more personal data (recall 0.967 instead of 0.980 on the held-out documents). `v1.1.1` is read correctly by transformers 4.57.6 and 5; `requirements.txt` asks for 4.57.6 or newer, the oldest version this was checked with.
 
+## Israeli identity numbers (optional check)
+
+An Israeli identity number (Teudat Zehut) is nine digits, and the last one is a check digit. The model cannot verify it, and its id class covers identity, passport, licence and bank account numbers alike, so a nine-digit enforcement or proceeding number is masked as one of them. With `SETER_IL_ID_CHECK=1` such a number is left in the text when all of these hold:
+
+- the model labelled it as an id, and in a long text no window labelled it as anything else;
+- it is exactly nine digits standing alone: no letter or digit touches it or is joined to it by punctuation, and no other digits follow or precede it across spaces, punctuation or a line break (so a number followed by a date or by a numbered clause stays masked);
+- its check digit is wrong;
+- the words directly before it, on its line, are `תיק הוצאה לפועל` (or `תיק הוצל"פ`), `הליך` or `אסמכתא`, alone or with an attached ב, ל, ה, מ, ש, כ (also after ו), optionally followed by `מספר` or `מס'`;
+- its whole line and the text around it (about 300 characters before and 200 after) have no word that says whose record it is (a patient, an employee, a customer, a member) and, within the paragraph, no word about an identity, passport, licence or account number;
+- the same stretch of text has no character that is out of place in Hebrew, Arabic or English prose: an emoji or other pictograph, a zero-width character, a byte-order mark, a direction override. Such characters can hide a word, so nothing is released near one;
+- the same digits are not masked, or left unreported, anywhere else in the request, however they are written there (with a hyphen, a space, or without the leading zero).
+
+| Text | With the check on |
+|---|---|
+| `תיק הוצאה לפועל מספר 034851272 נפתח בלשכת חיפה.` | left as it is |
+| `ת.ז. 034851272`, `מספר דרכון 034851272`, `SSN 123456789`, a bare `034851272` | masked |
+| `בתיק 034851272`, `תיק רפואי מספר 034851272`, `Tax file number 123456789` | masked |
+| `מספר הליך 034851272 (ת.ז. של החייב)`, `החולה דני לוי, מספר הליך 034851272` | masked |
+| `מספר התז של החייב בהליך 034851272`, `מספר חבר במועדון, אסמכתא 034851272` | masked |
+| `מספר הליך 034851272, ת.ז. של החייב 034851279.` | the check releases neither number |
+
+The rule is narrow on purpose. A wrong check digit alone is not enough: an identity number with one mistyped digit still gives the real one away, and many passport, social security and bank account numbers are nine digits that fail the check. A bare `תיק` is not enough either, because a medical, tax or population-registry file is numbered by the person's identity number, and English `case`, `file` and `reference` are ordinary words, so no English phrase releases a number. An identity word nearby keeps the number masked even when it describes a different number, as in the last row. Working out which number a label belongs to is where earlier versions of this rule went wrong.
+
+The check only decides about numbers the model reported; it never adds a mask. With the default model the model itself does not report the first number in the last row, nor the number in `Case no. 034851272`, with the check on or off. The table was measured with fast `v1.1.1` on transformers 4.57.6.
+
+It is off by default. The rule is word lists (`REFERENCE_BEFORE`, `IDENTITY_CUE` and `PERSON_RECORD` in `server.py`), not understanding: an enforcement number described in other words stays masked, and a personal number that the text introduces only as a proceeding number, with none of the listed words near it, would be released. `GET /health` reports `il_id_check`. Every number left in the text this way is listed under `kept` by `/v1/redact` and written to the log on both endpoints (logger `seter_guard`: type and position, never the digits; it goes through your logging configuration, or to stderr with a timestamp when there is none).
+
 ## Accuracy
 
 Character-level F1 on the Hebrew, Arabic and English records of the REDACT benchmark:
