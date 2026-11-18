@@ -48,6 +48,18 @@ def test_default_is_pinned_and_health_reports_what_was_loaded():
         assert (h["model"], h["revision"], h["commit"]) == (model, revision, server.DEFAULT_COMMIT)
 
 
+def test_fast_model_local_attention_setting():
+    """transformers 4.x reads the rotary-position setting of the local-attention layers from `local_rope_theta`
+    and silently falls back to 10000 when the key is missing (fast v1.1); the model was trained with 160000."""
+    cfg = server.ner.model.config
+    if cfg.model_type != "modernbert":
+        return
+    theta = getattr(cfg, "local_rope_theta", None)
+    if theta is None:
+        theta = cfg.rope_parameters["sliding_attention"]["rope_theta"]
+    assert theta == 160000
+
+
 def test_parse_model(tmp_path, monkeypatch):
     assert server.parse_model("org/repo@v1.2") == ("org/repo", "v1.2", False)
     assert server.parse_model("org/repo") == ("org/repo", None, False)
@@ -269,6 +281,11 @@ def _rule(text, number=None):
     return server._stands_alone(text, a, a + 9) and server._called_a_reference(text, a, a + 9)
 
 
+def _shows(out, number):
+    """Some four digits in a row of `number` are in `out`: a mask over one or two of its digits does not hide it."""
+    return any(number[i:i + 4] in out for i in range(len(number) - 3))
+
+
 def test_il_id_check_digit():
     assert server.il_id_check(VALID_ID) is True and server.il_id_check(FILE_NO) is False
     assert server.il_id_check("000000018") is True and server.il_id_check("123456782") is True
@@ -286,7 +303,10 @@ def test_stands_alone():
     for joined in (f"12-{FILE_NO}", f"{FILE_NO}-55", f"A{FILE_NO}", f"{FILE_NO}/21", f"1{FILE_NO}", f"{FILE_NO}.5", f"{FILE_NO}\\21",
                    f"{FILE_NO}–21", f"{FILE_NO}־21", f"{FILE_NO}:21", f"+{FILE_NO}1", f"21,{FILE_NO}", f"{FILE_NO}_21", f"ב{FILE_NO}",
                    f"{FILE_NO} 21", f"{FILE_NO} 0123", f"21 {FILE_NO}", f"{FILE_NO}-A", f"A-{FILE_NO}",
-                   f"{FILE_NO} - 21", f"{FILE_NO}  21", f"{FILE_NO} /21", f"{FILE_NO}‏-21", f"{FILE_NO}. 5", f"21 - {FILE_NO}"):
+                   f"{FILE_NO} - 21", f"{FILE_NO}  21", f"{FILE_NO} /21", f"{FILE_NO}‏-21", f"{FILE_NO}. 5", f"21 - {FILE_NO}",
+                   # any amount of punctuation between: a digit beyond it, or a letter joined by it
+                   f"{FILE_NO}--21", f"{FILE_NO} - - 21", f"{FILE_NO}--A", f"{FILE_NO}, 2024", f"{FILE_NO}\n\n1. הצדדים", f"{FILE_NO} (21)",
+                   f"{FILE_NO}" + " ." * 200 + " 21"):
         text = f"מספר {joined} נפתח"
         a = text.index(FILE_NO)
         assert not server._stands_alone(text, a, a + 9), text
@@ -302,6 +322,9 @@ def test_stands_alone():
     f"ההחלטה ניתנה בדלתיים סגורות. זאת ועוד, בהליך {FILE_NO} נקבע דיון", f"המכתב נשלח. נפתח הליך {FILE_NO}",
     # direction marks are ordinary beside digits in Hebrew text
     f"מספר הליך \u200f{FILE_NO}\u200f נדחה", f"מספר הליך \u200e{FILE_NO} נדחה ב-5% (₪ 100, 20°)", f"מספר\u00a0הליך {FILE_NO}\tנדחה",
+    # more look-alikes: "his partner" is not ת ז, a company is not a member, December is not one either
+    f"בת זוגו של המבקש, הליך {FILE_NO}", f"החברה הגישה בקשה בהליך {FILE_NO}", f"חברת הביטוח וחברות הבת, הליך {FILE_NO}",
+    f"5 December, הליך {FILE_NO}", f"התזה שלו, הליך {FILE_NO}",
     # an identity word in another paragraph is out of reach
     f"ת.ז. של החייב {VALID_ID}\n\nמספר הליך {FILE_NO}",
 ])
@@ -382,6 +405,18 @@ def test_a_number_named_as_an_enforcement_or_proceeding_number_can_be_released(t
     f"מספר הליך {FILE_NO}, שהוא מספר הזהות של החייב, טלפון 054-1234567", f"מספר הליך {FILE_NO}, שהוא מספר הזהות של החייב, בסך 15000 שקלים",
     f"מספר הליך {FILE_NO} (מס. ת.ז. של החייב), טלפון 054-1234567", f"מספר הליך {FILE_NO} (Mr. Smith's passport), טל' 054-1234567",
     f"מספר הליך {FILE_NO}\n(ת.ז. של החייב)", f"מספר הליך {FILE_NO} (ת''ז של החייב)",
+    # other spellings of the identity abbreviation: no mark, a typographic apostrophe, a hyphen, a slash, a space
+    f"מספר התז של החייב בהליך {FILE_NO}", f"בתז שלו, הליך {FILE_NO}", f"ת’ז החייב בהליך {FILE_NO}", f"ת‘ז החייב בהליך {FILE_NO}",
+    f"ת-ז החייב בהליך {FILE_NO}", f"ת/ז החייב בהליך {FILE_NO}", f"ת ז של החייב, הליך {FILE_NO}", f"ת`ז החייב בהליך {FILE_NO}",
+    # English words run together or in camelCase
+    f"customerId {VALID_ID}, אסמכתא {FILE_NO}", f"userId 7, אסמכתא {FILE_NO}", f"patientName, אסמכתא {FILE_NO}", f"PassportNo, אסמכתא {FILE_NO}",
+    f"IDNumber, אסמכתא {FILE_NO}", f"bankaccount, אסמכתא {FILE_NO}", f"taxid, אסמכתא {FILE_NO}", f"theID, אסמכתא {FILE_NO}",
+    f"newCustomer, אסמכתא {FILE_NO}", f"userid, אסמכתא {FILE_NO}",
+    # a vowel point must not turn "בתהליך" (in the process) into the word "הליך"
+    f"בתְהליך {FILE_NO}", f"בתהליִך {FILE_NO}",
+    # more words for whose record it is, in Hebrew and Arabic; an Arabic word stretched with a tatweel
+    f"מספר חבר במועדון, אסמכתא {FILE_NO}", f"חברי המועדון, אסמכתא {FILE_NO}", f"מספר מנוי, אסמכתא {FILE_NO}", f"תושב חיפה, הליך {FILE_NO}",
+    f"رقم الهـويـة، הליך {FILE_NO}", f"رخصه القيادة، הליך {FILE_NO}", f"العميل أحمد، הליך {FILE_NO}", f"المـريـض أحمد، הליך {FILE_NO}",
     # part of a longer number
     f"תיק הוצאה לפועל {FILE_NO} - 21", f"הליך {FILE_NO}  21", f"הליך {FILE_NO} /21", f"הליך {FILE_NO}‏-21", f"הליך {FILE_NO}-A",
 ])
@@ -426,7 +461,7 @@ def test_il_id_check_releases_an_enforcement_number_and_nothing_else(monkeypatch
                  f"תיק רפואי מספר {FILE_NO}", f"מספר הליך {FILE_NO} (ת.ז. של החייב)", f"בתיק {FILE_NO} נקבע דיון",
                  f"Tax file number {SSN}", f"The number we have on file: {SSN}"):
         got = redact(text)
-        assert (SSN if SSN in text else FILE_NO[:8]) not in got["text"] and got["kept"] == [], got
+        assert not _shows(got["text"], SSN if SSN in text else FILE_NO) and got["kept"] == [], got
     # Next to an identity number the check releases nothing. Whether the model itself reports the proceeding
     # number here differs between library versions (its score sits near the threshold), so only the check's
     # part is asserted: nothing under "kept", and the identity number masked.
@@ -480,6 +515,31 @@ def test_one_value_gets_one_answer(monkeypatch):
         r = c.post("/beta/litellm_basic_guardrail_api", json={"texts": texts}).json()
         assert r["action"] == "GUARDRAIL_INTERVENED" and not any(FILE_NO in t for t in r["texts"]), r
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [proceeding, "no pii"]}).json() == {"action": "NONE"}
+    # the same number written another way is the same number: a hyphen, a space, a direction mark, no leading zero,
+    # other digit shapes. The model is not asked here (the fake reports only the plain spelling).
+    for other in (f"{FILE_NO[:8]}-{FILE_NO[8]}", f"{FILE_NO[:4]} {FILE_NO[4:]}", f"{FILE_NO[:3]}\u200f{FILE_NO[3:]}", FILE_NO[1:],
+                  "٠٣٤٨٥١٢٧٢", "０３４８５１２７２"):
+        for texts in ([f"ת.ז. של החייב {other}", proceeding], [proceeding, f"ראו {other}"], [f"{proceeding}\n\nת.ז. {other}"]):
+            assert all(kept == [] for _masked, kept in server.scan_many(texts)), texts
+
+
+def test_a_number_is_masked_whole(monkeypatch):
+    """The model sometimes reports one or two digits of a number; the rest was printed next to the mask."""
+    text = f"מספר הליך {FILE_NO} נדחה, טלפון 054-1234567"
+    a, p = text.index(FILE_NO), text.index("054")
+    for pieces in ([(a, a + 1)], [(a, a + 1), (a + 5, a + 8)], [(a + 3, a + 4)], [(a + 8, a + 9)]):
+        _fake_entities(monkeypatch, lambda _t, pieces=pieces: [(x, y, "account_number", 0.9, True, {}) for x, y in pieces])
+        assert server.scan(text) == ([(a, a + 9, "ID")], []), pieces
+        assert server.mask(text)[0] == text.replace(FILE_NO, "[ID]")
+    # only the digit run itself: a phone number in groups is not pulled in, and words are left alone
+    _fake_entities(monkeypatch, lambda _t: [(p + 1, p + 2, "private_phone", 0.9, True, {}), (0, 2, "private_person", 0.9, True, {})])
+    assert server.scan(text)[0] == [(0, 2, "PERSON"), (p, p + 3, "PHONE")]
+    # two pieces called different things: one mask, and never released
+    monkeypatch.setattr(server, "IL_ID_CHECK", True)
+    _fake_entities(monkeypatch, lambda _t: [(a, a + 1, "account_number", 0.9, True, {}), (a + 5, a + 8, "private_phone", 0.9, True, {})])
+    assert server.scan(text) == ([(a, a + 9, "ID")], [])
+    _fake_entities(monkeypatch, lambda _t: [(a, a + 1, "account_number", 0.9, True, {})])
+    assert server.scan(text) == ([], [(a, a + 9, "ID")])                         # the whole number is what gets judged
 
 
 def test_a_released_number_is_logged_without_its_digits(monkeypatch, caplog):

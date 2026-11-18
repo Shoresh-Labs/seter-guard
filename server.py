@@ -10,10 +10,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
 
-DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1"
-# The commit that tag pointed to when this line was written. A tag can be moved on the Hub; if v1.1 ever
+# v1.1.1 = the v1.1 weights with a config.json that transformers 4.x reads correctly. With v1.1 and
+# transformers 4.x the local-attention layers silently used the wrong rotary-position setting and the
+# model missed more (held-out recall 0.967 instead of 0.980).
+DEFAULT_MODEL = "shoresh-labs/seter-pii-he-ar-fast@v1.1.1"
+# The commit that tag pointed to when this line was written. A tag can be moved on the Hub; if v1.1.1 ever
 # resolves to anything else the server refuses to start instead of running weights nobody chose.
-DEFAULT_COMMIT = "2744c393718de9a911d9db3478341984a99a7cdb"
+DEFAULT_COMMIT = "170f528e2aeb93e25b71300bb535a583d640e9f7"
 _REPO_ID = re.compile(r"^[\w.-]+(/[\w.-]+)?$")
 
 
@@ -115,9 +118,11 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 IL_ID_CHECK = _flag("SETER_IL_ID_CHECK")
 _HE = "א-ת"
 _HE_PREFIX = "(?:ו?[בלהמשכ]{1,2})?"   # attached ב ל ה מ ש כ, also after ו; a bare ו is left out ("ותיק" is a veteran)
-# An abbreviation starts a word (so "סגורות. זאת" is not ת.ז) and has one or two marks inside: ת"ז, ת''ז, ת.ז, ת“ז
+# An abbreviation starts a word (so "סגורות. זאת" is not ת.ז) and has one or two marks inside: ת"ז, ת''ז, ת.ז, ת“ז, ת’ז.
+# The identity abbreviation is also written with no mark, with a hyphen, a slash or a space (התז, ת-ז, ת/ז, ת ז);
+# those count when the ז ends the word, so "בת זוג" does not.
 _ABBR = rf"(?<![{_HE}])[ובלהמשכ]{{0,2}}"
-_MARK = "[\"״”“„'׳.]{1,2}"
+_MARK = "[\"״”“„'׳.’‘‚`]{1,2}"
 # Bounded repeats only, and matched against the last REFERENCE_TAIL characters before the number: an open
 # "\s*" here backtracked for seconds on a long run of spaces.
 REFERENCE_TAIL = 80
@@ -126,20 +131,26 @@ REFERENCE_BEFORE = re.compile(
     rf"(?<![{_HE}]){_HE_PREFIX}(?:תיק\s{{1,2}}ה?(?:הוצאה\s{{1,2}}לפועל|הוצל[\"״”]פ)|הליך|אסמכתא)"
     rf"(?:\s{{1,2}}(?:מספר|מס['׳.]?))?\s{{0,2}}:?\s{{0,2}}$")
 # Stems, so that every inflected form counts (דרכונו, חשבונך, עובדיו, לקוחותיה). Only look-alikes known to be
-# harmless are let through by name: חשבונית / חשבוניות (an invoice), עוסקת / עוסקים (deals with), and
-# עובדה / עובדות / עובדתי (a fact).
+# harmless are let through by name: חשבונית / חשבוניות (an invoice), עוסקת / עוסקים (deals with),
+# עובדה / עובדות / עובדתי (a fact), and חברה / חברת / חברות (a company).
 IDENTITY_CUE = re.compile(
-    rf"{_ABBR}ת{_MARK}\s*ז|{_ABBR}מ{_MARK}\s*[זא]|{_ABBR}ח{_MARK}\s*[ןנ]|{_ABBR}ע{_MARK}\s*מ|(?<![{_HE}])תז(?![{_HE}])"
+    rf"{_ABBR}ת(?:{_MARK}\s*ז|[-–־/ ]?ז(?![{_HE}]))|{_ABBR}מ{_MARK}\s*[זא]|{_ABBR}ח{_MARK}\s*[ןנ]|{_ABBR}ע{_MARK}\s*מ"
     rf"|זהות|זיהוי|מזהה|תעודת|דרכו[ןנ]|פספורט|רי?שיו[ןנ]|חשבו[ןנ](?!י(?:ת|ות)(?![{_HE}]))|ח-ן|בנק|עוסק(?!(?:ת|ים|ות)(?![{_HE}]))"
-    r"|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخصة|حساب"
-    r"|(?<![a-z])(?:ids?|i\.d|t\.z|ssn|ss#|social|passports?|licen[cs]es?|accounts?|acct|iban|identity|national|mrn|tax|medical"
-    r"|insurance|immigration|personnel|personal|bank)(?![a-z])", re.IGNORECASE)
+    r"|ביטוח\s+לאומי|מספר\s+אישי|מס\s+הכנסה|פקיד\s+שומה|משרד\s+הפנים|קופת\s+חולים|רפואי|هوي[ةه]|جواز|رخص[ةه]|حساب|بطاق[ةه]|ضريب|تأمين"
+    # English: short words need a word boundary (camelCase counts as one, see _cue_positions); longer ones count
+    # wherever they appear, so that "bankaccount" and "taxid" do
+    r"|(?<![a-z])(?:ids?|i\.d|t\.z|ssn|ss#|mrn)(?![a-z])"
+    r"|social|passport|licen[cs]e|account|acct|iban|identity|national|tax|medical|insurance|immigration|personnel|personal|bank",
+    re.IGNORECASE)
 PERSON_RECORD = re.compile(
-    rf"מטופל|חול(?:ה|ים|ת|י)|עובד(?!(?:ה|ות|תי(?:ת|ים|ות)?)(?![{_HE}]))|לקוח|תלמיד|סטודנט|נוסע|מבוטח|משתמש|נישום|مريض|موظف"
-    r"|(?<![a-z])(?:patient|employee|customer|client|passenger|student|taxpayer|member|user)s?(?![a-z])", re.IGNORECASE)
+    rf"מטופל|חול(?:ה|ים|ת|י)|עובד(?!(?:ה|ות|תי(?:ת|ים|ות)?)(?![{_HE}]))|לקוח|תלמיד|סטודנט|נוסע|מבוטח|משתמש|נישום"
+    rf"|מנוי|תושב|אזרח|חבר(?!(?:ה|ת|ות)(?![{_HE}]))"
+    r"|مريض|مرضى|موظف|عميل|عملاء|زبون|زبائن|طالب|طلاب|مسافر|مستخدم|عضو|أعضاء|مواطن|مؤمن"
+    # English: a word may run on (patientName, customers) but must start one, so "December" is not a member
+    r"|(?<![a-z])(?:patient|employee|customer|client|passenger|student|taxpayer|member|user)", re.IGNORECASE)
 _BLANK_LINE = re.compile(r"\n[^\S\n]*\n")
-_NIQQUD = re.compile("[֑-ׇ]")
-_INVISIBLE = "\u200e\u200f\u061c"   # direction marks that may sit beside digits
+_BIDI = frozenset("\u200e\u200f\u061c")   # left-to-right, right-to-left and Arabic letter marks: ordinary beside digits
+_TATWEEL = "\u0640"                         # stretches an Arabic word without changing it
 
 
 class _WhenNothingElseListens(logging.StreamHandler):
@@ -170,44 +181,38 @@ def il_id_check(number: str):
     return total % 10 == 0
 
 
-def _beyond(text: str, i: int, step: int):
-    """Walking from text[i] away from a number: (spaces before a separator, the separator, spaces after it,
-    the first other character). Spaces include direction marks; the separator is one character that is not
-    a letter or digit, "" when there is none."""
-    def skip(i):
-        n = 0
-        while 0 <= i < len(text) and (text[i].isspace() or text[i] in _INVISIBLE):
-            i, n = i + step, n + 1
-        return i, n
-    i, gap = skip(i)
-    ch = text[i] if 0 <= i < len(text) else ""
-    if not ch or ch.isalnum():
-        return gap, "", 0, ch
-    i, gap_after = skip(i + step)
-    return gap, ch, gap_after, text[i] if 0 <= i < len(text) else ""
+STANDS_ALONE_REACH = 64
 
 
 def _stands_alone(text: str, a: int, b: int):
     """The digits at text[a:b] are a whole number, not a piece of a longer number or code.
 
-    A piece: a letter or digit touching it (A034851272); a digit beyond spaces (034851272 21, a number written
-    in groups); a digit beyond one separator, with or without spaces (12-034851272, 034851272/21,
-    034851272 - 21, 034851272. 5); a letter joined by a separator with no space (034851272-A). The one
-    exception is a label's colon before the number (אסמכתא:034851272)."""
-    for start, step in ((a - 1, -1), (b, 1)):
-        gap, sep, gap_after, ch = _beyond(text, start, step)
-        if not ch.isalnum():
+    Looking outward from each end, past spaces, line breaks, direction marks and punctuation, to the first
+    letter or digit. A digit there makes this a piece (034851272 21, 12-034851272, 034851272/21,
+    034851272 - 21, 034851272--21, 034851272, 2024): a number written in groups cannot be told from a number
+    followed by another one, so a date or a clause number right after it also keeps it masked. A letter makes it
+    a piece when nothing but punctuation, or nothing at all, separates them (A034851272, 034851272-A); the one
+    exception is a label's colon before the number (אסמכתא:034851272). More than STANDS_ALONE_REACH characters
+    of spaces and punctuation: not judged, so not alone."""
+    for i, step in ((a - 1, -1), (b, 1)):
+        between, spaced = "", False
+        while 0 <= i < len(text) and not text[i].isalnum():
+            if text[i].isspace() or text[i] in _BIDI:
+                spaced = True
+            else:
+                between += text[i]
+            if len(between) > STANDS_ALONE_REACH or abs(i - (a if step < 0 else b)) > 4 * STANDS_ALONE_REACH:
+                return False
+            i += step
+        if not 0 <= i < len(text):
             continue
-        if ch.isdigit():
+        if text[i].isdigit():
             return False
-        if not sep and not gap:                                   # a letter touching the number
-            return False
-        if sep and not gap and not gap_after and not (step < 0 and sep == ":"):
+        if not spaced and not (step < 0 and between == ":"):       # a letter touching the number or joined to it
             return False
     return True
 
 
-_BIDI = set("‎‏؜")   # left-to-right, right-to-left and Arabic letter marks: ordinary beside digits
 # Letters by category that show nothing (Hangul and other fillers); everything else odd is caught by category.
 _FILLERS = set("͏ᅟᅠ឴឵᠋᠌᠍᠎᠏⠀ㅤﾠ")
 
@@ -255,7 +260,12 @@ def _cue_positions(text: str):
                 continue
             # hidden: shows nothing, is a spacing mark, or is a space that folding made out of something that was
             # not one. Removed in one reading and a space in the other, so it can neither split nor join a word.
-            hidden = category in ("Cf", "Mc") or c in _FILLERS or (c.isspace() and not ch.isspace())
+            hidden = category in ("Cf", "Mc") or c in _FILLERS or c == _TATWEEL or (c.isspace() and not ch.isspace())
+            # customerId, IDNumber: a capital after a small letter, or before one, starts a word in the spaced reading
+            if c.isupper() and spaced and spaced[-1].isalpha() and (spaced[-1].islower() or text[i + 1:i + 2].islower()):
+                origin.append(i)
+                joined.append("")
+                spaced.append(" ")
             origin.append(i)
             joined.append("" if hidden else c)
             spaced.append(" " if hidden else c)
@@ -285,7 +295,10 @@ def _called_a_reference(text: str, a: int, b: int):
     """The words directly before text[a:b] name an enforcement or proceeding number, and the text around it
     has no word about an identity, passport, licence or account number or about whose record it is."""
     line_start = text.rfind("\n", 0, a) + 1
-    tail = "".join(c for c in text[max(line_start, a - REFERENCE_TAIL):a] if c not in _BIDI)  # marks beside the digits
+    # direction marks beside the digits and marks on a letter are taken out first: with a vowel point after its
+    # ת, "בתְהליך" (in the process) would otherwise read as ב + ת + "הליך"
+    tail = "".join(c for c in text[max(line_start, a - REFERENCE_TAIL):a]
+                   if c not in _BIDI and unicodedata.category(c) not in ("Mn", "Me"))
     if not REFERENCE_BEFORE.search(tail):
         return False
     line_end = text.find("\n", b)
@@ -465,6 +478,11 @@ def _detect(text: str):
             a += 1
         if a >= b:
             continue
+        # The model sometimes reports only some digits of a number ("[ID]3485[ID]2"). A number is masked whole.
+        while a > 0 and text[a].isdigit() and text[a - 1].isdigit():
+            a -= 1
+        while b < len(text) and text[b - 1].isdigit() and text[b].isdigit():
+            b += 1
         last = out[-1] if out else None
         if last and a < last[1]:
             # the same stretch reported by two windows: mask the union (when in doubt, mask); the type comes from
@@ -489,18 +507,28 @@ def _detect(text: str):
     return masked, kept
 
 
+def _digits(text: str):
+    """Only the digits of `text`, as ASCII: what is left of a number however it is written (03485127-2,
+    0348 51272, with a direction mark inside, in full-width or Arabic-Indic digits)."""
+    return "".join(str(unicodedata.digit(c)) for c in text if c.isdigit() and unicodedata.digit(c, None) is not None)
+
+
 def scan_many(texts):
     """[(spans to mask, spans detected but left in the text)] for the texts of one request.
 
     One value gets one answer across the request. A number is left in a text only if every place where its
     digits appear, in any of the texts, is being left too; otherwise the copy that was masked (or that the
-    model did not report) would be given away by the copy that was not."""
+    model did not report) would be given away by the copy that was not. Copies are compared by their digits
+    alone and without leading zeros, so a hyphen, a space or a dropped zero does not make them different
+    numbers. Digits that only happen to line up across two other numbers count as a copy too: that masks."""
     found = [_detect(t) for t in texts]
-    releasing = Counter(t[a:b] for t, (_m, kept) in zip(texts, found) for a, b, _ in kept)
-    appears = {v: sum(t.count(v) for t in texts) for v in releasing}
+    key = lambda text, s: text[s[0]:s[1]].lstrip("0") or "0"
+    releasing = Counter(key(t, s) for t, (_m, kept) in zip(texts, found) for s in kept)
+    digits = [_digits(t) for t in texts] if releasing else []
+    appears = {v: sum(d.count(v) for d in digits) for v in releasing}
     out = []
     for text, (masked, kept) in zip(texts, found):
-        stay = [s for s in kept if appears[text[s[0]:s[1]]] == releasing[text[s[0]:s[1]]]]
+        stay = [s for s in kept if appears[key(text, s)] == releasing[key(text, s)]]
         out.append((sorted(masked + [s for s in kept if s not in stay]), stay))
         for a, b, t in stay:  # both endpoints pass through here; position only, never the digits
             log.info("left unmasked by il_id_check: %s at characters %d-%d of a %d-character text", t, a, b, len(text))
