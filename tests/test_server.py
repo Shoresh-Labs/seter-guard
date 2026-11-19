@@ -675,6 +675,11 @@ def test_a_piece_of_a_case_number_is_judged_whole():
     (f'בנק לאומי ת"א {CASE_NO}', CASE_NO), (f'ת.ז. של התובע בת"א {CASE_NO}', CASE_NO), (f'מספר דרכון, ת"א {CASE_NO}', CASE_NO),
     (f'ת"א (חשבון בנק) {CASE_NO}', CASE_NO), (f'account, ת"א {CASE_NO}', CASE_NO), (f'חֶשבון בסניף ת"א {CASE_NO}', CASE_NO),
     (f'חש‍בון בסניף ת"א {CASE_NO}', CASE_NO),
+    # ... and so does a word for whose record it is, or for a branch
+    ('מספר מבוטח בסניף ת"א 12345/67', "12345/67"), (f'לקוח ת"א {CASE_NO}', CASE_NO), (f'לאומי, סניף ת"א {CASE_NO}', CASE_NO),
+    (f'סְניף ת"א {CASE_NO}', CASE_NO), (f'ת"א {CASE_NO} של הלקוח', CASE_NO), (f'Tel Aviv branch, ת"א {CASE_NO}', CASE_NO),
+    # "on account of" and "in the name of" are written like two kinds of proceeding, which are therefore not in the list
+    (f'שולם ע"ח {CASE_NO}', CASE_NO), (f'ע"ש {CASE_NO}', CASE_NO),
     # a character with no place in prose on the line: nothing is released near it
     (f'ת"א {CASE_NO}​', CASE_NO), (f'שלום​ ת"א {CASE_NO}', CASE_NO), (f'‮ת"א {CASE_NO}‬', CASE_NO), (f'ת"א {CASE_NO} 🙂', CASE_NO),
     (f'ת"א 45127-09-23​45', CASE_NO), (f'ת‍"א {CASE_NO}', CASE_NO),

@@ -342,17 +342,21 @@ def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
 #   - the word directly before it, on its line, is the abbreviation of a kind of proceeding (COURT_CASE_TYPES:
 #     ת"א, ע"פ, בג"ץ, תמ"ש ...), alone or with an attached ו ב ל ה מ ש כ, optionally followed by the court in
 #     brackets, as in ע"פ (מחוזי ת"א), and by "מספר" or "מס'";
-#   - there is no identity, passport, licence, bank or account word (IDENTITY_CUE) on its line from
-#     COURT_CUE_BEFORE characters before it to COURT_CUE_AFTER after it: ת"א is also how Tel Aviv is written,
-#     and "סניף ת"א 12345/67" after the word חשבון is a bank account;
+#   - on its line, from COURT_CUE_BEFORE characters before it to COURT_CUE_AFTER after it, there is no identity,
+#     passport, licence, bank or account word (IDENTITY_CUE), no word that says whose record it is
+#     (PERSON_RECORD) and no word for a branch (BRANCH_CUE): ת"א is also how Tel Aviv is written, and
+#     "סניף ת"א 12345/67" is a bank account. The window is narrower than the identity-number check's on
+#     purpose: a judgment gives the party's identity number in the same paragraph as the case number, and
+#     here the shape and the abbreviation are evidence that nine bare digits do not have;
 #   - its line has no character that is out of place in prose near it (see _is_odd);
 #   - and every other place where the same digits appear in the request is released too (see scan_many).
 # A number the model reported only in part ("23456-11-1" of 23456-11-19) is judged, and released, whole.
 #
 # Not covered, so still masked: a number after words and no abbreviation ("תיק אזרחי 45127-09-23", "תיק מספר ..."),
 # a four-digit year, a dash other than "-", and kinds of proceeding that are not in the list. Left out of the
-# list on purpose because they are also labels for a person's or a company's number: ב"ל (National Insurance),
-# ע"מ (a licensed dealer), בע"מ (Ltd.), מ"א (a soldier's personal number).
+# list on purpose because they also label a person's or a company's number or an account: ב"ל (National
+# Insurance), ע"מ (a licensed dealer), בע"מ (Ltd.), מ"א (a soldier's personal number), ע"ח (also "on account
+# of") and ע"ש (also "in the name of").
 #
 # Off by default, like the identity-number check: this is a word list, and a guardrail that is unsure masks.
 IL_COURT_CASE = _flag("SETER_IL_COURT_CASE")
@@ -361,10 +365,10 @@ COURT_CASE_TYPES = (
     'ת"א', 'תא"מ', 'תא"ק', 'ת"ק', 'ת"צ', 'ת"ט', 'ה"פ', 'ה"ט', 'ע"א', 'רע"א', 'בר"ע', 'רת"ק', 'בש"א', 'דנ"א', 'ע"ר',
     'פר"ק', 'פש"ר', 'חדל"ת', 'חדל"פ', 'ת"ע', 'תמ"ש', 'תלה"מ', 'עמ"ש', 'רמ"ש', 'י"ס', 'א"פ',
     # criminal, traffic
-    'ת"פ', 'תפ"ח', 'תפ"ע', 'ע"פ', 'עפ"ג', 'עפ"ת', 'רע"פ', 'בש"פ', 'דנ"פ', 'מ"ת', 'מ"י', 'ע"ח', 'עמ"ת', 'עמ"י', 'ת"ת',
+    'ת"פ', 'תפ"ח', 'תפ"ע', 'ע"פ', 'עפ"ג', 'עפ"ת', 'רע"פ', 'בש"פ', 'דנ"פ', 'מ"ת', 'מ"י', 'עמ"ת', 'עמ"י', 'ת"ת',
     'תת"ע', 'גמ"ר', 'עת"פ', 'רע"ב',
     # High Court of Justice, administrative
-    'בג"ץ', 'בג"צ', 'דנג"ץ', 'עת"מ', 'עע"מ', 'בר"מ', 'עמ"נ', 'ע"ש', 'עש"א', 'ו"ע',
+    'בג"ץ', 'בג"צ', 'דנג"ץ', 'עת"מ', 'עע"מ', 'בר"מ', 'עמ"נ', 'עש"א', 'ו"ע',
     # labour
     'סע"ש', 'ס"ע', 'ע"ע', 'ד"מ', 'ד"ט', 'עב"ל', 'ק"ג', 'פ"ה', 'ס"ק', 'עס"ק', 'בר"ש',
 )
@@ -372,6 +376,7 @@ _QUOTE = "(?:[\"״”“]|'')"   # the mark inside an abbreviation: ", ״, typog
 COURT_CASE_NUMBER = re.compile(r"[0-9]{1,6}-(?:0[1-9]|1[0-2])-[0-9]{2}|[0-9]{1,5}/[0-9]{2}")
 COURT_CASE_LENGTH = 12      # the longest text COURT_CASE_NUMBER matches: 123456-12-23
 COURT_CUE_BEFORE, COURT_CUE_AFTER = 60, 20
+BRANCH_CUE = re.compile(r"סניף|סניפ|branch|فرع", re.IGNORECASE)
 # Matched against the last REFERENCE_TAIL characters before the number, with bounded repeats only (see REFERENCE_BEFORE).
 COURT_CASE_BEFORE = re.compile(
     rf"(?<!\w)ו?[בלהמשכ]{{0,2}}(?:{'|'.join(t.replace(chr(34), _QUOTE) for t in sorted(COURT_CASE_TYPES, key=len, reverse=True))})"
@@ -397,11 +402,15 @@ def court_case_number(text: str, a: int, b: int):
         return None
     line_end = text.find("\n", e)
     line_end = len(text) if line_end < 0 else line_end
-    identity, _person, odd, reach = _cue_positions(text)
+    identity, person, odd, reach = _cue_positions(text)
     k = bisect.bisect_left(odd, max(line_start, s - CONTEXT_BEFORE))
     if k < len(odd) and odd[k] < min(line_end, e + CONTEXT_AFTER):
         return None
-    if _any_between(identity, max(line_start, s - COURT_CUE_BEFORE), min(line_end, e + COURT_CUE_AFTER), reach):
+    lo, hi = max(line_start, s - COURT_CUE_BEFORE), min(line_end, e + COURT_CUE_AFTER)
+    if _any_between(identity, lo, hi, reach) or _any_between(person, lo, hi, reach):
+        return None
+    # no odd character is near (checked above), so only marks on a letter could hide this word
+    if BRANCH_CUE.search("".join(c for c in text[lo:hi] if unicodedata.category(c) not in ("Mn", "Me"))):
         return None
     return s, e
 
