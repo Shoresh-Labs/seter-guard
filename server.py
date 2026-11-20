@@ -329,6 +329,97 @@ def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
             and _stands_alone(text, a, b) and _called_a_reference(text, a, b))
 
 
+# ---- Israeli court case numbers ----------------------------------------------------------------------
+# A court case number is not personal data: it names a proceeding, and judgments print it. The model's
+# account_number class ("ID" here) takes the two ways such a number is written for an account number, so
+# 'ת"א 45127-09-23' comes out as 'ת"א [ID]'. Training the model out of it was tried (data recipe v10i) and
+# cost recall on identity and tax numbers, so it is done here, after the model.
+#
+# With SETER_IL_COURT_CASE=1 such a number is left in the text, but only when all of this holds:
+#   - the model labelled it ID, and no window called any part of it anything else;
+#   - it is written the way the courts write it (COURT_CASE_NUMBER): serial-month-year, as in 45127-09-23,
+#     or serial/year, as in 8954/11, in ASCII digits, and it is not a piece of a longer number;
+#   - the word directly before it, on its line, is the abbreviation of a kind of proceeding (COURT_CASE_TYPES:
+#     ת"א, ע"פ, בג"ץ, תמ"ש ...), alone or with an attached ו ב ל ה מ ש כ, optionally followed by the court in
+#     brackets, as in ע"פ (מחוזי ת"א), and by "מספר" or "מס'";
+#   - on its line, from COURT_CUE_BEFORE characters before it to COURT_CUE_AFTER after it, there is no identity,
+#     passport, licence, bank or account word (IDENTITY_CUE), no word that says whose record it is
+#     (PERSON_RECORD) and no word for a branch (BRANCH_CUE): ת"א is also how Tel Aviv is written, and
+#     "סניף ת"א 12345/67" is a bank account. The window is narrower than the identity-number check's on
+#     purpose: a judgment gives the party's identity number in the same paragraph as the case number, and
+#     here the shape and the abbreviation are evidence that nine bare digits do not have;
+#   - its line has no character that is out of place in prose near it (see _is_odd);
+#   - and every other place where the same digits appear in the request is released too (see scan_many).
+# A number the model reported only in part ("23456-11-1" of 23456-11-19) is judged, and released, whole.
+#
+# Not covered, so still masked: a number after words and no abbreviation ("תיק אזרחי 45127-09-23", "תיק מספר ..."),
+# a four-digit year, a dash other than "-", and kinds of proceeding that are not in the list. Left out of the
+# list on purpose because they also label a person's or a company's number or an account: ב"ל (National
+# Insurance), ע"מ (a licensed dealer), בע"מ (Ltd.), מ"א (a soldier's personal number), ע"ח (also "on account
+# of") and ע"ש (also "in the name of").
+#
+# Off by default, like the identity-number check: this is a word list, and a guardrail that is unsure masks.
+IL_COURT_CASE = _flag("SETER_IL_COURT_CASE")
+COURT_CASE_TYPES = (
+    # civil, family, insolvency
+    'ת"א', 'תא"מ', 'תא"ק', 'ת"ק', 'ת"צ', 'ת"ט', 'ה"פ', 'ה"ט', 'ע"א', 'רע"א', 'בר"ע', 'רת"ק', 'בש"א', 'דנ"א', 'ע"ר',
+    'פר"ק', 'פש"ר', 'חדל"ת', 'חדל"פ', 'ת"ע', 'תמ"ש', 'תלה"מ', 'עמ"ש', 'רמ"ש', 'י"ס', 'א"פ',
+    # criminal, traffic
+    'ת"פ', 'תפ"ח', 'תפ"ע', 'ע"פ', 'עפ"ג', 'עפ"ת', 'רע"פ', 'בש"פ', 'דנ"פ', 'מ"ת', 'מ"י', 'עמ"ת', 'עמ"י', 'ת"ת',
+    'תת"ע', 'גמ"ר', 'עת"פ', 'רע"ב',
+    # High Court of Justice, administrative
+    'בג"ץ', 'בג"צ', 'דנג"ץ', 'עת"מ', 'עע"מ', 'בר"מ', 'עמ"נ', 'עש"א', 'ו"ע',
+    # labour
+    'סע"ש', 'ס"ע', 'ע"ע', 'ד"מ', 'ד"ט', 'עב"ל', 'ק"ג', 'פ"ה', 'ס"ק', 'עס"ק', 'בר"ש',
+)
+_QUOTE = "(?:[\"״”“]|'')"   # the mark inside an abbreviation: ", ״, typographic quotes, or two apostrophes
+COURT_CASE_NUMBER = re.compile(r"[0-9]{1,6}-(?:0[1-9]|1[0-2])-[0-9]{2}|[0-9]{1,5}/[0-9]{2}")
+COURT_CASE_LENGTH = 12      # the longest text COURT_CASE_NUMBER matches: 123456-12-23
+COURT_CUE_BEFORE, COURT_CUE_AFTER = 60, 20
+BRANCH_CUE = re.compile(r"סניף|סניפ|branch|فرع", re.IGNORECASE)
+# Matched against the last REFERENCE_TAIL characters before the number, with bounded repeats only (see REFERENCE_BEFORE).
+COURT_CASE_BEFORE = re.compile(
+    rf"(?<!\w)ו?[בלהמשכ]{{0,2}}(?:{'|'.join(t.replace(chr(34), _QUOTE) for t in sorted(COURT_CASE_TYPES, key=len, reverse=True))})"
+    rf"(?:\s{{1,2}}\((?P<court>[{_HE}\"״”“'׳. -]{{1,30}})\))?"
+    rf"(?:\s{{1,2}}(?:מספר|מס['׳.]?))?\s{{1,2}}$")
+
+
+def court_case_number(text: str, a: int, b: int):
+    """(start, end) of the court case number that text[a:b] is, or is a piece of; None when it is not one,
+    or when anything around it leaves room for doubt (see the conditions above)."""
+    s, e = a, b
+    while s > 0 and e - s <= COURT_CASE_LENGTH and text[s - 1] in "0123456789-/":
+        s -= 1
+    while e < len(text) and e - s <= COURT_CASE_LENGTH and text[e] in "0123456789-/":
+        e += 1
+    if not COURT_CASE_NUMBER.fullmatch(text, s, e) or not _stands_alone(text, s, e):
+        return None
+    line_start = text.rfind("\n", 0, s) + 1
+    tail = "".join(c for c in text[max(line_start, s - REFERENCE_TAIL):s]
+                   if c not in _BIDI and unicodedata.category(c) not in ("Mn", "Me"))
+    m = COURT_CASE_BEFORE.search(tail)
+    if not m or (m.group("court") and IDENTITY_CUE.search(m.group("court"))):
+        return None
+    line_end = text.find("\n", e)
+    line_end = len(text) if line_end < 0 else line_end
+    identity, person, odd, reach = _cue_positions(text)
+    k = bisect.bisect_left(odd, max(line_start, s - CONTEXT_BEFORE))
+    if k < len(odd) and odd[k] < min(line_end, e + CONTEXT_AFTER):
+        return None
+    lo, hi = max(line_start, s - COURT_CUE_BEFORE), min(line_end, e + COURT_CUE_AFTER)
+    if _any_between(identity, lo, hi, reach) or _any_between(person, lo, hi, reach):
+        return None
+    # no odd character is near (checked above), so only marks on a letter could hide this word
+    if BRANCH_CUE.search("".join(c for c in text[lo:hi] if unicodedata.category(c) not in ("Mn", "Me"))):
+        return None
+    return s, e
+
+
+def release_reason(text: str, a: int, b: int):
+    """Which check left text[a:b] in the text: the two never apply to the same span (nine bare digits, or not)."""
+    return "il_id_check" if il_id_check(text[a:b]) is not None else "il_court_case"
+
+
 ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
 app = FastAPI(title="Seter Guard")
 
@@ -503,7 +594,18 @@ def _detect(text: str):
     for a, b, t, _owner, mixed in out:
         # a weak second opinion counts too: if any window called part of this span something else, it stays masked
         mixed = mixed or any(x < b and a < y and u != t for x, y, u in doubts)
-        (kept if releasable(text, a, b, t, mixed) else masked).append((a, b, t))
+        if releasable(text, a, b, t, mixed):
+            kept.append((a, b, t))
+            continue
+        # A court case number is judged whole, also when the model reported a piece of it or two pieces apart:
+        # nothing that any window called something else may lie anywhere in it.
+        case = court_case_number(text, a, b) if IL_COURT_CASE and t == "ID" and not mixed else None
+        if case and not any(x < case[1] and case[0] < y and (u != t or m) for x, y, u, _o, m in out) \
+                and not any(x < case[1] and case[0] < y and u != t for x, y, u in doubts):
+            if (*case, t) not in kept:
+                kept.append((*case, t))
+        else:
+            masked.append((a, b, t))
     return masked, kept
 
 
@@ -522,7 +624,7 @@ def scan_many(texts):
     alone and without leading zeros, so a hyphen, a space or a dropped zero does not make them different
     numbers. Digits that only happen to line up across two other numbers count as a copy too: that masks."""
     found = [_detect(t) for t in texts]
-    key = lambda text, s: text[s[0]:s[1]].lstrip("0") or "0"
+    key = lambda text, s: _digits(text[s[0]:s[1]]).lstrip("0") or "0"
     releasing = Counter(key(t, s) for t, (_m, kept) in zip(texts, found) for s in kept)
     digits = [_digits(t) for t in texts] if releasing else []
     appears = {v: sum(d.count(v) for d in digits) for v in releasing}
@@ -531,7 +633,8 @@ def scan_many(texts):
         stay = [s for s in kept if appears[key(text, s)] == releasing[key(text, s)]]
         out.append((sorted(masked + [s for s in kept if s not in stay]), stay))
         for a, b, t in stay:  # both endpoints pass through here; position only, never the digits
-            log.info("left unmasked by il_id_check: %s at characters %d-%d of a %d-character text", t, a, b, len(text))
+            log.info("left unmasked by %s: %s at characters %d-%d of a %d-character text",
+                     release_reason(text, a, b), t, a, b, len(text))
     return out
 
 
@@ -570,7 +673,7 @@ def redact(body: RedactIn):
     masked, found = _render(body.text, to_mask)
     # kept: detected and deliberately left in the text, so a log can tell that from "nothing found"
     return {"text": masked, "entities": found,
-            "kept": [{"type": t, "start": a, "end": b, "reason": "il_id_check"} for a, b, t in kept]}
+            "kept": [{"type": t, "start": a, "end": b, "reason": release_reason(body.text, a, b)} for a, b, t in kept]}
 
 
 class GuardIn(BaseModel):
@@ -604,4 +707,4 @@ def litellm_guardrail(body: GuardIn):
 def health():
     # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
     return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
-            "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK}
+            "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK, "il_court_case": IL_COURT_CASE}
