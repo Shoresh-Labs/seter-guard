@@ -616,9 +616,13 @@ def test_il_court_case_leaves_the_hard4_case_numbers_in_the_text(monkeypatch):
     assert r["text"] == CASE_TEXT and r["kept"] == [{"type": "ID", "start": a, "end": a + len(CASE_NO), "reason": "il_court_case"}]
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [CASE_TEXT]}).json() == {"action": "NONE"}
     # the case number stays, the personal data in the same sentence does not
-    text = f'בתיק ת"א {CASE_NO}, התובע יוסי כהן, טלפון 054-7812345, ת"ז {VALID_ID}.'
+    text = f'בתיק ת"א {CASE_NO}, התובע יוסי כהן, טלפון 054-7812345.'
     out = redact(text)["text"]
-    assert CASE_NO in out and "יוסי כהן" not in out and "054-7812345" not in out and VALID_ID not in out, out
+    assert CASE_NO in out and "יוסי כהן" not in out and "054-7812345" not in out, out
+    # ... unless an identity number is given in the same paragraph: then the case number is masked with the rest
+    text = f'בתיק ת"א {CASE_NO}, התובע יוסי כהן, טלפון 054-7812345, ת"ז {VALID_ID}.'
+    got = redact(text)
+    assert CASE_NO not in got["text"] and VALID_ID not in got["text"] and "יוסי כהן" not in got["text"] and got["kept"] == [], got
     # a number in the same shape that is not introduced as a case, a bank account, a phone number after "ת"א"
     for text, number in ((f"מספר חשבון {CASE_NO} בבנק לאומי.", CASE_NO), (f"חשבון בנק בסניף ת\"א {CASE_NO}.", CASE_NO),
                          ("חשבון בנק 12-345-678901 על שם דני לוי.", "12-345-678901"), ('ת"א 03-5551234 התקשרו בבקשה.', "03-5551234"),
@@ -630,19 +634,88 @@ def test_il_court_case_leaves_the_hard4_case_numbers_in_the_text(monkeypatch):
 
 
 @pytest.mark.parametrize("text,number", [
-    (f'ת"א {CASE_NO} נדון', CASE_NO), (f'בת"א {CASE_NO} נקבע', CASE_NO), (f'ות"פ {CASE_NO}.', CASE_NO), (f'שבע"פ {CASE_NO} נדחה', CASE_NO),
+    (f'ת"א {CASE_NO} נדון', CASE_NO), (f'בת"א {CASE_NO} נקבע', CASE_NO), (f'ות"פ {CASE_NO}.', CASE_NO), (f'שבעפ"ג {CASE_NO} נדחה', CASE_NO),
     ('ראו רע"א 2146/19, עע"מ 311/20 וכן בש"א 1234/07.', "311/20"), ('בג"ץ 5658/23 התנועה נ\' הכנסת', "5658/23"),
-    ('בג"צ 1/49 בז\'רנו נ\' שר המשטרה', "1/49"), ('ע"פ (מחוזי ת"א) 71234-01-20 פלוני נ\' מדינת ישראל', "71234-01-20"),
-    ('ת"א (שלום חיפה) 3345/08 כהן נ\' לוי', "3345/08"), (f'ת"א מס\' {CASE_NO}', CASE_NO), (f'ת"א מספר {CASE_NO}', CASE_NO),
+    ('בג"צ 1/49 בז\'רנו נ\' שר המשטרה', "1/49"), ('עפ"ג (מחוזי ת"א) 71234-01-20 פלוני נ\' מדינת ישראל', "71234-01-20"),
+    ('ע"א (מחוזי חיפה) 3345/08 כהן נ\' לוי', "3345/08"), (f'ת"א (שלום חיפה) {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ת"א מס\' {CASE_NO}', CASE_NO), (f'ת"א מספר {CASE_NO}', CASE_NO),
     ('עמ"ש 44123-05-21, תלה"מ 5521-10-22, רמ"ש 30111-02-23.', "5521-10-22"), ('סע"ש 23456-11-19 רחל לוי נ\' החברה', "23456-11-19"),
     ('פש"ר 1234-05-16 וחדל"ת 22331-04-21', "22331-04-21"),
     # other marks inside the abbreviation, and direction marks beside the number
     (f'ת״א {CASE_NO}', CASE_NO), (f'ת”א {CASE_NO}', CASE_NO), (f"ת''א {CASE_NO}", CASE_NO), (f'ת"א ‏{CASE_NO}‏ נדון', CASE_NO),
-    # an identity word further away than the rule looks, or on another line
-    (f'ת"פ 12345-06-21 מדינת ישראל נ\' דני לוי, ת.ז. {VALID_ID}.', "12345-06-21"), (f'ת.ז. {VALID_ID}\nת"א {CASE_NO}', CASE_NO),
+    # an identity word in another paragraph, or further away than the rule looks
+    (f'ת.ז. {VALID_ID}\n\nת"א {CASE_NO}', CASE_NO), (f'ת"א {CASE_NO}\n\nמספר חשבון: 123', CASE_NO),
+    ("מספר חשבון " + "א" * 300 + f'\nת"א {CASE_NO}', CASE_NO), (f'ת"א {CASE_NO}\n' + "א" * 200 + " מספר חשבון", CASE_NO),
 ])
 def test_a_number_written_as_a_court_case_can_be_released(text, number):
     assert _whole(text, number), text
+
+
+# Found by reviewing the first version of the rule (PR #6) with the real model: in each of these the number was
+# masked with the rule off and left in the text with it on. None is a court case.
+REVIEW_LEAKS = [
+    ('בנק | סניף | חשבון\nלאומי | 810 | ת"א 12345/67', "12345/67"),               # the label is the table header on the line above
+    ('ת"א 12345/67 - זה המספר שמופיע בכרטיס של המטופל', "12345/67"),               # whose record it is, further along the line
+    ('ת"א 12345/67, כפי שמופיע בפוליסה של המבוטח', "12345/67"),
+    ('התשלום בוצע ע"פ 12345/67', "12345/67"),                                       # ע"פ: "according to"
+    ('שולם ע"פ 4411/23 לדני לוי', "4411/23"),
+    ('הילד רשום בבי"ס 12345/67', "12345/67"),                                       # ב + י"ס: a school
+    ('נועה לומדת בבי"ס 4411/23', "4411/23"),
+    ('מספר אשפוז בת"א 12345/67', "12345/67"),                                       # a hospital admission in Tel Aviv
+    ('a/c ת"א 12345/67', "12345/67"),
+    ('דיסקונט ת"א 123456-01-23', "123456-01-23"),                                   # a bank by its name
+    ('Leumi\tת"א 12345/67', "12345/67"),
+    ('דני לוי נולד בת"א 12-05-85', "12-05-85"),                                     # a date
+    ('תאריך לידה: בת"א 12-05-85', "12-05-85"),
+]
+# ... and a request in which the label is the message before the number
+REVIEW_LEAK_REQUEST = ["מספר הזהות או הדרכון של הלקוח?", 'ת"א 45127-09-23']
+
+
+@pytest.mark.parametrize("text,number", REVIEW_LEAKS)
+def test_the_leaks_found_in_review_stay_masked(text, number):
+    assert _case(text, number) is None, text
+
+
+def test_the_leaks_found_in_review_stay_masked_with_the_model(monkeypatch):
+    """Whatever the model reports in these sentences, the rule releases nothing: the output is the same with the
+    rule on and off."""
+    def run(on):
+        monkeypatch.setattr(server, "IL_COURT_CASE", on)
+        one = [redact(text) for text, _number in REVIEW_LEAKS]
+        many = [(server._render(t, to_mask)[0], kept) for t, (to_mask, kept) in zip(REVIEW_LEAK_REQUEST, server.scan_many(REVIEW_LEAK_REQUEST))]
+        return one, many
+    (off, off_many), (on, on_many) = run(False), run(True)
+    assert on == off and on_many == off_many
+    assert all(r["kept"] == [] for r in on) and all(kept == [] for _text, kept in on_many)
+
+
+def test_a_label_in_a_neighbouring_text_keeps_a_case_number_masked(monkeypatch):
+    monkeypatch.setattr(server, "IL_COURT_CASE", True)
+    def every_number(t):
+        return [(m.start(), m.end(), "account_number", 0.9, True, {}) for m in __import__("re").finditer(CASE_NO, t)]
+    _fake_entities(monkeypatch, every_number)
+    case = f'ת"א {CASE_NO}'
+    a = case.index(CASE_NO)
+    span = (a, a + len(CASE_NO), "ID")
+    kept = lambda texts: [k for _masked, k in server.scan_many(texts)]
+    assert kept([case]) == [[span]] and kept(["שלום, מה שלומך?", case, "תודה רבה"]) == [[], [span], []]
+    # the label is the text before, or the text after, or two texts back with an empty or a short one between
+    for texts, i in ((REVIEW_LEAK_REQUEST, 1), (["מה מספר חשבון הבנק שלך?", case], 1), ([case, "זה מספר החשבון שלי"], 0),
+                     (["פרטי הלקוח", "", case], 2), (["Account number?", "שלום", case], 2), ([case, "ok", "(לאומי)"], 0),
+                     (["העברה בדיסקונט", case], 1), (["ok\u200b", case], 1)):
+        got = server.scan_many(texts)
+        assert got[i] == ([span], []), texts
+        r = c.post("/beta/litellm_basic_guardrail_api", json={"texts": texts}).json()
+        assert r["action"] == "GUARDRAIL_INTERVENED" and not any(CASE_NO in t for t in r["texts"]), r
+    # only as far as the rule reads inside a text: 300 characters back and 200 on, counted from the number
+    far = "א " * 200
+    assert kept(["מספר חשבון " + far, case]) == [[], [span]] and kept([case, far + " מספר חשבון"]) == [[span], []]
+    long_case = far + case
+    assert kept(["מספר חשבון", long_case])[1] == [(len(far) + a, len(far) + a + len(CASE_NO), "ID")]
+    # the identity-number check is not changed by this: it reads its own text only
+    monkeypatch.setattr(server, "IL_ID_CHECK", True)
+    _fake_entities(monkeypatch, lambda t: [(m.start(), m.end(), "account_number", 0.9, True, {}) for m in __import__("re").finditer(FILE_NO, t)])
+    assert [k for _m, k in server.scan_many(["שלום", FILE_TEXT])][1] != []
 
 
 def test_a_piece_of_a_case_number_is_judged_whole():
@@ -680,6 +753,23 @@ def test_a_piece_of_a_case_number_is_judged_whole():
     (f'סְניף ת"א {CASE_NO}', CASE_NO), (f'ת"א {CASE_NO} של הלקוח', CASE_NO), (f'Tel Aviv branch, ת"א {CASE_NO}', CASE_NO),
     # "on account of" and "in the name of" are written like two kinds of proceeding, which are therefore not in the list
     (f'שולם ע"ח {CASE_NO}', CASE_NO), (f'ע"ש {CASE_NO}', CASE_NO),
+    # ... wherever it stands in the paragraph: the line above, further along the line, the next line
+    (f'ת"פ 12345-06-21 מדינת ישראל נ\' דני לוי, ת.ז. {VALID_ID}.', "12345-06-21"), (f'ת.ז. {VALID_ID}\nת"א {CASE_NO}', CASE_NO),
+    (f'מספר חשבון:\nת"א {CASE_NO}', CASE_NO), (f'ת"א {CASE_NO} הוא המספר שאליו יש להעביר, זה חשבון הבנק של דני', CASE_NO),
+    (f'ת"א {CASE_NO}\nמספר דרכון', CASE_NO), (f'פרטי הלקוח:\n\nת"א {CASE_NO}', CASE_NO), (f'בג"ץ 5658/23 העותר, ת"ז {VALID_ID}', "5658/23"),
+    # a bank by its name, without the word bank; "a/c"; a hospital admission
+    (f'לאומי ת"א {CASE_NO}', CASE_NO), (f'פועלים, ת"א {CASE_NO}', CASE_NO), (f'העברה לדיסקונט\nת"א {CASE_NO}', CASE_NO),
+    (f'מזרחי טפחות ת"א {CASE_NO}', CASE_NO), (f'Leumi ת"א {CASE_NO}', CASE_NO), (f'Ｌｅｕｍｉ ת"א {CASE_NO}', CASE_NO), (f'לְאוּמי ת"א {CASE_NO}', CASE_NO),
+    (f'בנק יהב ת"א {CASE_NO}', CASE_NO), (f'a/c ת"א {CASE_NO}', CASE_NO), (f'acc. no ת"א {CASE_NO}', CASE_NO), (f'מספר אשפוז בת"א {CASE_NO}', CASE_NO),
+    # after ת"א (also Tel Aviv) the serial/year form is a bank account's, whatever stands around it
+    ('ת"א 12345/67', "12345/67"), ('ת"א 8954/11 נדון', "8954/11"), ('בת"א 3345/08 נקבע', "3345/08"), ('ת"א (שלום חיפה) 3345/08 כהן נ\' לוי', "3345/08"),
+    ('ת״א 12345/67', "12345/67"), ("ת''א 12345/67", "12345/67"), ('ת"א מספר 12345/67', "12345/67"),
+    # a date is written like a case number with a short serial
+    ('נולד בת"א 12-05-85', "12-05-85"), ('בג"ץ 1-01-20', "1-01-20"), ('תמ"ש 31-12-99', "31-12-99"),
+    # abbreviations that are also everyday words (according to, a school, a Talmud Torah, kilograms, a sub-clause),
+    # and words that an attached letter makes out of a listed abbreviation (cooperation, for the time being)
+    (f'ע"פ {CASE_NO}', CASE_NO), ('שולם ע"פ 4411/23', "4411/23"), (f'נמסר בע"פ {CASE_NO}', CASE_NO), ('בי"ס 4411/23', "4411/23"), (f'י"ס {CASE_NO}', CASE_NO),
+    (f'ת"ת {CASE_NO}', CASE_NO), ('70 ק"ג 123/45', "123/45"), ('ס"ק 12/34', "12/34"), (f'שת"פ {CASE_NO}', CASE_NO), ('לע"ע 123/45', "123/45"),
     # a character with no place in prose on the line: nothing is released near it
     (f'ת"א {CASE_NO}​', CASE_NO), (f'שלום​ ת"א {CASE_NO}', CASE_NO), (f'‮ת"א {CASE_NO}‬', CASE_NO), (f'ת"א {CASE_NO} 🙂', CASE_NO),
     (f'ת"א 45127-09-23​45', CASE_NO), (f'ת‍"א {CASE_NO}', CASE_NO),

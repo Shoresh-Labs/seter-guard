@@ -109,22 +109,29 @@ It is off by default. The rule is word lists (`REFERENCE_BEFORE`, `IDENTITY_CUE`
 A court case number names a proceeding, not a person, and judgments print it. The model's id class takes the two ways such a number is written for an account number, so `ת"א 45127-09-23` comes out as `ת"א [ID]`. With `SETER_IL_COURT_CASE=1` the number is left in the text when all of these hold:
 
 - the model labelled it as an id, and no window labelled any part of it as anything else;
-- it is written as serial-month-year (`45127-09-23`) or serial/year (`8954/11`), in plain digits, and is not a piece of a longer number;
-- the word directly before it, on its line, is the abbreviation of a kind of proceeding (`ת"א`, `ע"פ`, `בג"ץ`, `תמ"ש` and the rest of the 65 listed in `COURT_CASE_TYPES` in `server.py`), alone or with an attached ו, ב, ל, ה, מ, ש, כ, optionally followed by the court in brackets, as in `ע"פ (מחוזי ת"א)`, and by `מספר` or `מס'`;
-- no identity, passport, licence, bank, account or branch word, and no word that says whose record it is (a customer, an insured person, an employee), stands on its line within 60 characters before it or 20 after it. `ת"א` is also how Tel Aviv is written, and `חשבון בסניף ת"א 12345/67` is a bank account;
-- no character that is out of place in prose is near it on its line (the same test as for identity numbers);
+- it is written as serial-month-year (`45127-09-23`, with a serial of three digits or more: `12-05-85` is a date) or serial/year (`8954/11`), in plain digits, and is not a piece of a longer number;
+- the word directly before it, on its line, is the abbreviation of a kind of proceeding (`ת"א`, `ע"א`, `בג"ץ`, `תמ"ש` and the rest of the 59 listed in `COURT_CASE_TYPES` in `server.py`), alone or with an attached ו, ב, ל, ה, מ, ש, כ, optionally followed by the court in brackets, as in `ע"א (מחוזי חיפה)`, and by `מספר` or `מס'`;
+- after `ת"א` only the serial-month-year form counts. `ת"א` is also how Tel Aviv is written, and `ת"א 12345/67` is how a bank account at a Tel Aviv branch is written;
+- no identity, passport, licence, bank, account, branch or medical word, no bank's name (`לאומי`, `דיסקונט`, `Leumi` …), and no word that says whose record it is (a customer, an insured person, an employee) is near it: on its line, or within 300 characters before it or 200 after it. Labels of a number count within its paragraph, the other words across blank lines too. This is what the identity-number check reads;
+- where those 300 and 200 characters pass the start or the end of the text, they continue into the neighbouring texts of the request: the label may be the question in the message before the number;
+- no character that is out of place in prose is near it (the same test as for identity numbers);
 - the same digits are not masked, or left unreported, anywhere else in the request.
 
 | Text | With the rule on |
 |---|---|
 | `ת"א 45127-09-23 נדון בבית משפט השלום בתל אביב.` | left as it is |
-| `ע"פ (מחוזי ת"א) 71234-01-20 פלוני נ' מדינת ישראל` | the number is left; the model's other masks stay |
+| `עפ"ג (מחוזי ת"א) 71234-01-20 פלוני נ' מדינת ישראל` | the number is left; the model's other masks stay |
 | `בתיק ת"א 45127-09-23, התובע יוסי כהן, טלפון 054-7812345` | the number is left; the name and the phone number are masked |
+| `בתיק ת"א 45127-09-23, התובע יוסי כהן, ת"ז 034851279` | masked: an identity number is given in the same paragraph |
 | `תיק מספר 45127-09-23`, `תיק אזרחי 45127-09-23` | masked: words and no abbreviation |
-| `מספר חשבון 45127-09-23 בבנק לאומי`, `חשבון בנק בסניף ת"א 45127-09-23` | masked |
-| `ת"א 03-5551234`, `ת"א 45127-09-23-1` | masked: not written the way a court writes it |
+| `מספר חשבון 45127-09-23 בבנק לאומי`, `חשבון בנק בסניף ת"א 45127-09-23`, `לאומי ת"א 45127-09-23` | masked |
+| `ת"א 8954/11`, `ת"א 12345/67` | masked: serial/year after `ת"א` |
+| `ת"א 03-5551234`, `ת"א 45127-09-23-1`, `בת"א 12-05-85` | masked: not written the way a court writes it |
+| `שולם ע"פ 4411/23`, `בבי"ס 4411/23` | masked: not in the list |
 
-A number the model reported only in part (it sometimes masks `23456-11-1` of `23456-11-19`) is judged and left whole. Like the identity-number check, the rule only decides about numbers the model reported and never adds a mask; it is off by default, `GET /health` reports `il_court_case`, and every number left in the text is listed under `kept` by `/v1/redact` with the reason `il_court_case` and written to the log without its digits. Six abbreviations are left out of the list on purpose because they also label a person's or a company's number or an account: `ב"ל`, `ע"מ`, `בע"מ`, `מ"א`, `ע"ח` (also "on account of") and `ע"ש` (also "in the name of"). The two switches are independent. The table was measured with fast `v1.1.1` on transformers 4.57.6.
+The rule reads widely on purpose, and that has a price: a case number stays masked whenever the party's identity number, or a word such as `העובד` or `הלקוח`, is in the same paragraph, which is common in a judgment. The first version read only 60 characters back and 20 on, on the number's line, and let through a bank account under a table header, a number followed by `של המבוטח`, and an answer to a question about an identity number.
+
+A number the model reported only in part (it sometimes masks `23456-11-1` of `23456-11-19`) is judged and left whole. Like the identity-number check, the rule only decides about numbers the model reported and never adds a mask; it is off by default, `GET /health` reports `il_court_case`, and every number left in the text is listed under `kept` by `/v1/redact` with the reason `il_court_case` and written to the log without its digits. Left out of the list on purpose: `ב"ל`, `ע"מ`, `בע"מ`, `מ"א`, `ע"ח` (also "on account of") and `ע"ש` (also "in the name of"), which also label a person's or a company's number or an account; and `ע"פ` (also "according to"), `י"ס` (with ב, a school), `ת"ת` (also a Talmud Torah), `ק"ג` (also kilograms) and `ס"ק` (also a sub-clause), which are also everyday words. So a criminal appeal's number (`ע"פ 1234/20`) stays masked. The two switches are independent. The table was measured with fast `v1.1.1` on transformers 4.57.6.
 
 ## Accuracy
 
