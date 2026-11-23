@@ -589,9 +589,12 @@ def _whole(text, number):
 
 
 def test_court_case_rule_on_the_hard4_case_numbers():
-    for text, numbers in HARD4_CASES:
+    for text, numbers in HARD4_CASES[:2]:
         for n in numbers:
             assert _whole(text, n), (text, n)
+    # the third is a bare citation: nothing on its line says court, so it stays masked
+    text, numbers = HARD4_CASES[2]
+    assert all(_case(text, n) is None for n in numbers)
 
 
 def test_il_court_case_is_off_by_default(monkeypatch):
@@ -605,7 +608,7 @@ def test_il_court_case_is_off_by_default(monkeypatch):
 def test_il_court_case_leaves_the_hard4_case_numbers_in_the_text(monkeypatch):
     monkeypatch.setattr(server, "IL_COURT_CASE", True)
     assert c.get("/health").json()["il_court_case"] is True
-    for text, numbers in HARD4_CASES:
+    for text, numbers in HARD4_CASES[:2]:
         r = redact(text)
         assert all(n in r["text"] for n in numbers), r
         assert not any(e["type"] == "ID" for e in r["entities"]), r
@@ -616,11 +619,11 @@ def test_il_court_case_leaves_the_hard4_case_numbers_in_the_text(monkeypatch):
     assert r["text"] == CASE_TEXT and r["kept"] == [{"type": "ID", "start": a, "end": a + len(CASE_NO), "reason": "il_court_case"}]
     assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [CASE_TEXT]}).json() == {"action": "NONE"}
     # the case number stays, the personal data in the same sentence does not
-    text = f'בתיק ת"א {CASE_NO}, התובע יוסי כהן, טלפון 054-7812345.'
+    text = f'בתיק ת"א {CASE_NO} בבית משפט השלום, התובע יוסי כהן, טלפון 054-7812345.'
     out = redact(text)["text"]
     assert CASE_NO in out and "יוסי כהן" not in out and "054-7812345" not in out, out
     # ... unless an identity number is given in the same paragraph: then the case number is masked with the rest
-    text = f'בתיק ת"א {CASE_NO}, התובע יוסי כהן, טלפון 054-7812345, ת"ז {VALID_ID}.'
+    text = f'בתיק ת"א {CASE_NO} בבית משפט השלום, התובע יוסי כהן, טלפון 054-7812345, ת"ז {VALID_ID}.'
     got = redact(text)
     assert CASE_NO not in got["text"] and VALID_ID not in got["text"] and "יוסי כהן" not in got["text"] and got["kept"] == [], got
     # a number in the same shape that is not introduced as a case, a bank account, a phone number after "ת"א"
@@ -634,16 +637,19 @@ def test_il_court_case_leaves_the_hard4_case_numbers_in_the_text(monkeypatch):
 
 
 @pytest.mark.parametrize("text,number", [
-    (f'ת"א {CASE_NO} נדון', CASE_NO), (f'בת"א {CASE_NO} נדון', CASE_NO), (f'ות"פ {CASE_NO}.', CASE_NO), (f'שבעפ"ג {CASE_NO} נדחה', CASE_NO),
-    ('ראו רע"א 2146/19, עע"מ 311/20 וכן בש"א 1234/07.', "311/20"), ('בג"ץ 5658/23 התנועה נ\' הכנסת', "5658/23"),
+    (f'ת"א {CASE_NO} כהן נ\' לוי', CASE_NO), (f'בת"א {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ות"פ {CASE_NO} מדינת ישראל נ\' לוי.', CASE_NO), (f'שבעפ"ג {CASE_NO} נדחה בפסק הדין', CASE_NO),
+    ('ראו פסק דין רע"א 2146/19, עע"מ 311/20 וכן בש"א 1234/07.', "311/20"), ('בג"ץ 5658/23 התנועה נ\' הכנסת', "5658/23"),
     ('בג"צ 1/49 בז\'רנו נ\' שר המשטרה', "1/49"), ('עפ"ג (מחוזי ת"א) 71234-01-20 פלוני נ\' מדינת ישראל', "71234-01-20"),
-    ('ע"א (מחוזי חיפה) 3345/08 כהן נ\' לוי', "3345/08"), (f'ת"א (שלום חיפה) {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ת"א מס\' {CASE_NO} נדון', CASE_NO), (f'ת"א מספר {CASE_NO} נדון', CASE_NO),
-    ('עמ"ש 44123-05-21, תלה"מ 5521-10-22, רמ"ש 30111-02-23.', "5521-10-22"), ('סע"ש 23456-11-19 רחל לוי נ\' החברה', "23456-11-19"),
-    ('פש"ר 1234-05-16 וחדל"ת 22331-04-21', "22331-04-21"),
+    ('ע"א (מחוזי חיפה) 3345/08 כהן נ\' לוי', "3345/08"), (f'ת"א (שלום חיפה) {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ת"א מס\' {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ת"א מספר {CASE_NO} כהן נ\' לוי', CASE_NO),
+    ('בבית המשפט לענייני משפחה: עמ"ש 44123-05-21, תלה"מ 5521-10-22, רמ"ש 30111-02-23.', "5521-10-22"), ('סע"ש 23456-11-19 רחל לוי נ\' החברה', "23456-11-19"),
+    ('פש"ר 1234-05-16 וחדל"ת 22331-04-21, בימ"ש מחוזי', "22331-04-21"),
+    # the kind of court and its seat in the brackets is evidence enough
+    ('ע"א (מחוזי חיפה) 3345/08', "3345/08"), (f'ת"א (שלום ת"א) {CASE_NO}', CASE_NO), ('תמ"ש (משפחה ראשל"צ) 4412-03-22', "4412-03-22"),
+    ('סע"ש (אזורי לעבודה תל אביב) 23456-11-19', "23456-11-19"), (f'ת"א {CASE_NO}, פס"ד מיום 3.5.24', CASE_NO), (f'בתי המשפט: ת"א {CASE_NO}', CASE_NO),
     # other marks inside the abbreviation, and direction marks beside the number
-    (f'ת״א {CASE_NO} נדון', CASE_NO), (f'ת”א {CASE_NO} נדון', CASE_NO), (f"ת''א {CASE_NO} נדון", CASE_NO), (f'ת"א ‏{CASE_NO}‏ נדון', CASE_NO),
+    (f'ת״א {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ת”א {CASE_NO} כהן נ\' לוי', CASE_NO), (f"ת''א {CASE_NO} כהן נ' לוי", CASE_NO), (f'ת"א ‏{CASE_NO}‏ כהן נ\' לוי', CASE_NO),
     # an identity word in another paragraph, or further away than the rule looks
-    ("מספר חשבון " + "א" * 300 + f'\nת"א {CASE_NO} נדון', CASE_NO), (f'ת"א {CASE_NO} נדון\n' + "א" * 200 + " מספר חשבון", CASE_NO),
+    ("מספר חשבון " + "א" * 300 + f'\nת"א {CASE_NO} כהן נ\' לוי', CASE_NO), (f'ת"א {CASE_NO} כהן נ\' לוי\n' + "א" * 200 + " מספר חשבון", CASE_NO),
 ])
 def test_a_number_written_as_a_court_case_can_be_released(text, number):
     assert _whole(text, number), text
@@ -687,11 +693,25 @@ SECOND_REVIEW_LEAKS = [
     # a branch, in Arabic, stretched with a tatweel
     ('فــرع ת"א 45127-09-23', "45127-09-23"),
 ]
+# Found by reviewing the third version (PR #7 at e9e01ac): 19 more, none a court case.
+THIRD_REVIEW_LEAKS = [
+    # ת"א is Tel Aviv, and a word that was taken for the courts' is on the line
+    ('תביעה לדמי אבטלה שהוגשה בת"א 55120-10-22', "55120-10-22"), ('תביעה לקופת הגמל, מספר עמית בת"א 20455-08-16', "20455-08-16"),
+    ('מספר התביעה שלי במוקד ת"א 88120-03-24', "88120-03-24"), ('אני שופט כדורגל, מספר רישום באיגוד ת"א 7412-03-88', "7412-03-88"),
+    ('המשרד המחוזי של משרד הרישוי בת"א 8841-02-97', "8841-02-97"), ('לשכת הבריאות המחוזית ת"א 77120-05-22', "77120-05-22"),
+    ('פיקדון אצל עורך הדין של התובע, ת"א 45127-09-23', "45127-09-23"), ('ערעור על אחוזי נכות, ועדה בת"א 55120-10-22', "55120-10-22"),
+    # ... or a kind of court alone in the brackets
+    ('קוד כניסה ת"א (עבודה) 4412-06-20', "4412-06-20"), ('מספר תיק רווחה ת"א (משפחה) 30412-07-19', "30412-07-19"),
+    # a label that was in no word list, before another listed abbreviation
+    ('קצבת נכות ע"א 55120/22', "55120/22"), ('דו"ח חניה ת"פ 4580/23', "4580/23"), ('מרשם ד"מ 77120/25', "77120/25"),
+    ('מספר רכב ע"א 12345/67', "12345/67"), ('קוד סודי ה"פ 30412/24', "30412/24"), ('מספר הזמנה ת"ק 2512/23 על שם דני לוי', "2512/23"),
+    ('תיק ניכויים ע"ר 58012/34', "58012/34"), ('מבקש מקלט, מספר תיק ע"ע 12345/21', "12345/21"), ('שובר תשלום ת"צ 30412/24', "30412/24"),
+]
 # ... and a request in which the label is the message before the number
 REVIEW_LEAK_REQUEST = ["מספר הזהות או הדרכון של הלקוח?", 'ת"א 45127-09-23']
 
 
-@pytest.mark.parametrize("text,number", REVIEW_LEAKS + SECOND_REVIEW_LEAKS)
+@pytest.mark.parametrize("text,number", REVIEW_LEAKS + SECOND_REVIEW_LEAKS + THIRD_REVIEW_LEAKS)
 def test_the_leaks_found_in_review_stay_masked(text, number):
     assert _case(text, number) is None, text
 
@@ -701,7 +721,7 @@ def test_the_leaks_found_in_review_stay_masked_with_the_model(monkeypatch):
     rule on and off."""
     def run(on):
         monkeypatch.setattr(server, "IL_COURT_CASE", on)
-        one = [redact(text) for text, _number in REVIEW_LEAKS + SECOND_REVIEW_LEAKS]
+        one = [redact(text) for text, _number in REVIEW_LEAKS + SECOND_REVIEW_LEAKS + THIRD_REVIEW_LEAKS]
         many = [(server._render(t, to_mask)[0], kept) for t, (to_mask, kept) in zip(REVIEW_LEAK_REQUEST, server.scan_many(REVIEW_LEAK_REQUEST))]
         return one, many
     (off, off_many), (on, on_many) = run(False), run(True)
@@ -714,7 +734,7 @@ def test_a_label_in_a_neighbouring_text_keeps_a_case_number_masked(monkeypatch):
     def every_number(t):
         return [(m.start(), m.end(), "account_number", 0.9, True, {}) for m in __import__("re").finditer(CASE_NO, t)]
     _fake_entities(monkeypatch, every_number)
-    case = f'ע"א {CASE_NO}'
+    case = f'ע"א {CASE_NO} כהן נ\' לוי'
     a = case.index(CASE_NO)
     span = (a, a + len(CASE_NO), "ID")
     kept = lambda texts: [k for _masked, k in server.scan_many(texts)]
@@ -739,7 +759,7 @@ def test_a_label_in_a_neighbouring_text_keeps_a_case_number_masked(monkeypatch):
 
 
 def test_a_piece_of_a_case_number_is_judged_whole():
-    text = 'סע"ש 23456-11-19 רחל לוי'                                           # the model reports 23456-11-1 here
+    text = 'סע"ש 23456-11-19 רחל לוי נ\' החברה'                                           # the model reports 23456-11-1 here
     a = text.index("23456")
     for x, y in ((a, a + 5), (a + 6, a + 8), (a, a + 10), (a + 9, a + 11)):
         assert server.court_case_number(text, x, y) == (a, a + 11), (x, y)
@@ -781,17 +801,13 @@ def test_a_piece_of_a_case_number_is_judged_whole():
     (f'לאומי ת"א {CASE_NO}', CASE_NO), (f'פועלים, ת"א {CASE_NO}', CASE_NO), (f'העברה לדיסקונט\nת"א {CASE_NO}', CASE_NO),
     (f'מזרחי טפחות ת"א {CASE_NO}', CASE_NO), (f'Leumi ת"א {CASE_NO}', CASE_NO), (f'Ｌｅｕｍｉ ת"א {CASE_NO}', CASE_NO), (f'לְאוּמי ת"א {CASE_NO}', CASE_NO),
     (f'בנק יהב ת"א {CASE_NO}', CASE_NO), (f'a/c ת"א {CASE_NO}', CASE_NO), (f'acc. no ת"א {CASE_NO}', CASE_NO), (f'מספר אשפוז בת"א {CASE_NO}', CASE_NO),
-    # ת"א is also Tel Aviv: with no word of the courts on its line, or a court in the brackets, it stays masked
-    (f'ת"א {CASE_NO}', CASE_NO), (f'בת"א {CASE_NO} נקבע', CASE_NO), (f'ת"א מספר {CASE_NO}', CASE_NO), (f'ת״א {CASE_NO}', CASE_NO),
-    (f'ת"א (יפו) {CASE_NO}', CASE_NO), (f'בתיק ת"א {CASE_NO}', CASE_NO), (f'שלום, ת"א {CASE_NO}', CASE_NO), (f'דרך השלום 12, ת"א {CASE_NO}', CASE_NO),
-    (f'בית המשפט\nת"א {CASE_NO}', CASE_NO),
     # a label of a number is read across a blank line too
     (f'ת.ז. {VALID_ID}\n\nע"א 3345/08', "3345/08"), ('ע"א 3345/08\n\nמספר חשבון: 123', "3345/08"), ('סניף 810\n\nע"א 3345/08', "3345/08"),
     # words an attached letter makes, and things a person holds that carry a number
     ('מת"ק 12345/24', "12345/24"), ('מה"ט 4512/19', "4512/19"), ('ממ"י 45127/23', "45127/23"), ('משכורת, ע"א 3345/08', "3345/08"),
     ('policy no. ע"א 3345/08', "3345/08"), ('credit card ע"א 3345/08', "3345/08"), ('قرض ע"א 3345/08', "3345/08"), ('لئــومي ע"א 3345/08', "3345/08"),
     # after ת"א (also Tel Aviv) the serial/year form is a bank account's, whatever stands around it
-    ('ת"א 12345/67', "12345/67"), ('ת"א 8954/11 נדון', "8954/11"), ('בת"א 3345/08 נקבע', "3345/08"), ('ת"א (שלום חיפה) 3345/08 כהן נ\' לוי', "3345/08"),
+    ('ת"א 12345/67', "12345/67"), ('ת"א 8954/11 כהן נ\' לוי', "8954/11"), ('בת"א 3345/08 נקבע', "3345/08"), ('ת"א (שלום חיפה) 3345/08 כהן נ\' לוי', "3345/08"),
     ('ת״א 12345/67', "12345/67"), ("ת''א 12345/67", "12345/67"), ('ת"א מספר 12345/67', "12345/67"),
     # a date is written like a case number with a short serial
     ('נולד בת"א 12-05-85', "12-05-85"), ('בג"ץ 1-01-20', "1-01-20"), ('תמ"ש 31-12-99', "31-12-99"),
@@ -805,13 +821,32 @@ def test_a_piece_of_a_case_number_is_judged_whole():
     # the court in brackets is a short Hebrew name and nothing else
     (f'ת"א (John Smith) {CASE_NO}', CASE_NO), (f'ת"א (דירה 5) {CASE_NO}', CASE_NO), (f'ת"א ({"א" * 31}) {CASE_NO}', CASE_NO),
 ])
-def test_everything_else_in_that_shape_stays_masked(text, number):
+def test_everything_else_in_that_shape_stays_masked(text, number, monkeypatch):
+    assert _case(text, number) is None, text
+    # ... and not for want of a court word: each stays masked when every line counts as being about a court
+    monkeypatch.setattr(server, "COURT_WORD", __import__("re").compile(""))
+    assert _case(text, number) is None, text
+
+
+@pytest.mark.parametrize("text,number", [
+    # nothing on the line says court: a bare citation, and words that are said of other things too
+    (f'ת"א {CASE_NO}', CASE_NO), (f'בת"א {CASE_NO} נקבע', CASE_NO), (f'ת"א מספר {CASE_NO}', CASE_NO), (f'ת״א {CASE_NO}', CASE_NO),
+    (f'בתיק ת"א {CASE_NO}', CASE_NO), (f'שלום, ת"א {CASE_NO}', CASE_NO), (f'דרך השלום 12, ת"א {CASE_NO}', CASE_NO),
+    (f'בית המשפט\nת"א {CASE_NO}', CASE_NO), (f'ת"א {CASE_NO}\nכהן נ\' לוי', CASE_NO),
+    ('ע"א 3345/08', "3345/08"), ('ראו ע"א 8954/11 ורע"א 2146/19.', "8954/11"), ('בג"ץ 5658/23', "5658/23"), (f'ת"א {CASE_NO} נדון', CASE_NO),
+    (f'בתיק ת"א {CASE_NO}, התובע יוסי כהן', CASE_NO), ('הערעור בע"א 3345/08 נדחה', "3345/08"), ('השופט דן בע"א 3345/08', "3345/08"),
+    ('תביעה, תמ"ש 4412-03-22', "4412-03-22"), ('המחוזי דן בע"א 3345/08', "3345/08"), ('הנ"ל, ע"א 3345/08', "3345/08"), ('לנ\' כהן, ע"א 3345/08', "3345/08"),
+    # in the brackets a kind of court alone, or a place alone, is not a court
+    (f'ת"א (עבודה) {CASE_NO}', CASE_NO), (f'ת"א (משפחה) {CASE_NO}', CASE_NO), (f'ת"א (יפו) {CASE_NO}', CASE_NO), ('ע"א (מחוזי) 3345/08', "3345/08"),
+    ('ע"א (חיפה) 3345/08', "3345/08"), ('ע"א (עבודה מהבית) 3345/08', "3345/08"), ('ע"א (דרך השלום חיפה) 3345/08', "3345/08"),
+])
+def test_a_number_with_no_court_on_its_line_stays_masked(text, number):
     assert _case(text, number) is None, text
 
 
 def test_a_case_number_any_window_doubts_is_not_released(monkeypatch):
     monkeypatch.setattr(server, "IL_COURT_CASE", True)
-    text = f'ת"א {CASE_NO} נדון'
+    text = f'ת"א {CASE_NO} כהן נ\' לוי'
     a = text.index(CASE_NO)
     b = a + len(CASE_NO)
     span, main = (a, b, "ID"), (a, b, "account_number", 0.9, True, {})
@@ -846,7 +881,7 @@ def test_one_case_number_gets_one_answer(monkeypatch):
     def every_number(t):
         return [(m.start(), m.end(), "account_number", 0.9, True, {}) for m in __import__("re").finditer(CASE_NO, t)]
     _fake_entities(monkeypatch, every_number)
-    case, account = f'ע"א {CASE_NO}', f"מספר חשבון {CASE_NO}"
+    case, account = f'ע"א {CASE_NO} כהן נ\' לוי', f"מספר חשבון {CASE_NO}"
     assert server.scan(case)[1] and not server.scan(account)[1]
     for texts in ([account, case], [case, account], [f"{account}\n\n{case}"]):
         assert all(kept == [] for _masked, kept in server.scan_many(texts)), texts

@@ -352,9 +352,10 @@ def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
 #   - the word directly before it, on its line, is the abbreviation of a kind of proceeding (COURT_CASE_TYPES:
 #     ת"א, ע"א, בג"ץ, תמ"ש ...), alone or with an attached ו ב ל ה מ ש כ, optionally followed by the court in
 #     brackets, as in ע"א (מחוזי חיפה), and by "מספר" or "מס'";
-#   - after ת"א only the serial-month-year form counts, and only with a word of the courts on its line
-#     (COURT_WORD) or the court in the brackets: ת"א is also how Tel Aviv is written, "ת"א 12345/67" is how a
-#     bank account at a Tel Aviv branch is written, and a number given out in Tel Aviv follows "בת"א" as well;
+#   - its line says it is about a court (COURT_WORD), or the brackets after the abbreviation name a kind of
+#     court and its seat (COURT_IN_BRACKETS); this is asked of every abbreviation;
+#   - after ת"א only the serial-month-year form counts: ת"א is also how Tel Aviv is written, and
+#     "ת"א 12345/67" is how a bank account at a Tel Aviv branch is written;
 #   - around it there is no identity, passport, licence, bank, account or medical word (IDENTITY_CUE), no
 #     branch, no bank's name and no policy, loan, card or the like (COURT_OTHER_CUE), no word that says whose
 #     record it is (PERSON_RECORD) and no character that is out of place in prose (see _is_odd). "Around" is
@@ -401,14 +402,25 @@ COURT_CASE_TYPES = (
 _QUOTE = "(?:[\"״”“]|'')"   # the mark inside an abbreviation: ", ״, typographic quotes, or two apostrophes
 NOT_A_PROCEEDING = frozenset(('שת"פ', 'לע"ע', 'ממ"י', 'מת"ק', 'מה"ט'))
 TEL_AVIV = 'ת"א'
-# ת"א is released only with a word of the courts on its line, or with the court named in the brackets after it:
-# "משכנתא שנלקחה בת"א 30412-07-19" and "איכילוב ת"א 77120-05-22" are numbers given out in Tel Aviv.
-# Left out on purpose: "תיק" (also a medical or a recruiting-office file) and a bare "שלום" (a greeting, and a
-# road in Tel Aviv).
+# Evidence that the line is about a court, asked of every abbreviation: a court ("בית המשפט", בימ"ש), a judgment
+# ("פסק דין", פס"ד) or the "נ'" between the parties, on the number's line (COURT_WORD); or, in the brackets after the
+# abbreviation, a kind of court together with where it sits, as in ע"א (מחוזי חיפה) (COURT_IN_BRACKETS).
+# Word lists of what a number might be instead were tried twice and each time let through what was not on them
+# ("קצבת נכות ע"א 55120/22", "מרשם ד"מ 77120/25"), so the rule asks for what must be there.
+# Left out on purpose, each found leaking: "תביעה" (also an unemployment or an insurance claim), "ערעור" (also to a
+# medical committee), "מחוזי" (also a ministry's district office), "שופט" (also a referee), "תובע" / "נתבע" and
+# "נדון" (said of a committee too), "תיק" (also a medical file), a bare "שלום" (a greeting, and a road in Tel Aviv),
+# and in the brackets a kind of court alone: ת"א (עבודה) is Tel Aviv (work).
 COURT_WORD = re.compile(
-    rf"בית\s{{1,2}}ה?משפט|(?<![{_HE}])[ובלהמשכ]{{0,2}}בי(?:ה)?מ{_QUOTE}ש|מחוזי|תביע|תובע|נתבע|נדו[ןנ]|(?<![{_HE}])נ['׳]"
-    rf"|פסק[\s־-]{{1,2}}ה?די[ןנ]|(?<![{_HE}])[ובלהמשכ]{{0,2}}פס{_QUOTE}ד|שופט|ערעור")
-COURT_IN_BRACKETS = re.compile("שלום|מחוזי|עליון|משפחה|עבודה|תעבורה")
+    rf"ב(?:ית|תי)\s{{1,2}}ה?משפט|(?<![{_HE}])[ובלהמשכ]{{0,2}}בי(?:ה)?מ{_QUOTE}ש"
+    rf"|פסק[\s־-]{{1,2}}ה?די[ןנ]|(?<![{_HE}])[ובלהמשכ]{{0,2}}פס{_QUOTE}ד|(?<![{_HE}])נ['׳](?![{_HE}])")
+_COURT_SEATS = (
+    "ירושלים", "י-ם", "תל אביב", "תל-אביב", f"ת{_QUOTE}א", "חיפה", "באר שבע", "באר-שבע", f"ב{_QUOTE}ש", "נצרת", "מרכז", "לוד",
+    "פתח תקו", f"פ{_QUOTE}ת", "ראשון לציון", f"ראשל{_QUOTE}צ", "רמלה", "רחובות", "נתניה", "חדרה", "כפר סבא", f"כ{_QUOTE}ס",
+    "הרצליה", "אשדוד", "אשקלון", "קרי?ית גת", "אילת", "עכו", "קריות", "טבריה", "צפת", "עפולה", "קרי?ית שמונה", "נהריה",
+    "בית שאן", "בית שמש", "דימונה", "מסעדה", "קצרין", "בת ים", "רמת גן")
+COURT_IN_BRACKETS = re.compile(
+    rf"^(?:שלום|מחוזי|משפחה|(?:אזורי\s{{1,2}})?ל?עבודה|תעבורה|נוער)\s{{1,2}}(?:ב|ל)?(?:{'|'.join(_COURT_SEATS)})")
 COURT_CASE_NUMBER = re.compile(r"[0-9]{3,6}-(?:0[1-9]|1[0-2])-[0-9]{2}|[0-9]{1,5}/[0-9]{2}")
 COURT_CASE_LENGTH = 12      # the longest text COURT_CASE_NUMBER matches: 123456-12-23
 # A branch, and the banks by name: "לאומי ת"א 12345/67" and "Leumi" in the next column say bank without the word.
@@ -458,13 +470,12 @@ def court_case_number(text: str, a: int, b: int):
         return None
     if _ANY_QUOTE.sub('"', m.group("word")) in NOT_A_PROCEEDING:
         return None
-    if _ANY_QUOTE.sub('"', m.group("type")) == TEL_AVIV:
-        if "/" in text[s:e]:
-            return None
-        line_end = text.find("\n", e)
-        line = _plain(text[line_start:len(text) if line_end < 0 else line_end])
-        if not (COURT_WORD.search(line) or (m.group("court") and COURT_IN_BRACKETS.search(m.group("court")))):
-            return None
+    if _ANY_QUOTE.sub('"', m.group("type")) == TEL_AVIV and "/" in text[s:e]:
+        return None
+    line_end = text.find("\n", e)
+    line = _plain(text[line_start:len(text) if line_end < 0 else line_end])
+    if not (COURT_WORD.search(line) or (m.group("court") and COURT_IN_BRACKETS.search(m.group("court").strip()))):
+        return None
     identity, person, odd, reach = _cue_positions(text)
     # every list is read over the whole reach, blank lines included: a form's label is often a paragraph of
     # its own ("מספר זהות", a blank line, the number)
