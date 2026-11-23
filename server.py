@@ -352,20 +352,22 @@ def releasable(text: str, a: int, b: int, t: str, other_type_seen: bool):
 #   - the word directly before it, on its line, is the abbreviation of a kind of proceeding (COURT_CASE_TYPES:
 #     ת"א, ע"א, בג"ץ, תמ"ש ...), alone or with an attached ו ב ל ה מ ש כ, optionally followed by the court in
 #     brackets, as in ע"א (מחוזי חיפה), and by "מספר" or "מס'";
-#   - after ת"א only the serial-month-year form counts: ת"א is also how Tel Aviv is written, and
-#     "ת"א 12345/67" is how a bank account at a Tel Aviv branch is written;
+#   - after ת"א only the serial-month-year form counts, and only with a word of the courts on its line
+#     (COURT_WORD) or the court in the brackets: ת"א is also how Tel Aviv is written, "ת"א 12345/67" is how a
+#     bank account at a Tel Aviv branch is written, and a number given out in Tel Aviv follows "בת"א" as well;
 #   - around it there is no identity, passport, licence, bank, account or medical word (IDENTITY_CUE), no
-#     branch and no bank's name (COURT_OTHER_CUE), no word that says whose record it is (PERSON_RECORD) and no
-#     character that is out of place in prose (see _is_odd). "Around" is what the identity-number check
-#     reads: its whole line and CONTEXT_BEFORE characters back and CONTEXT_AFTER on, the labels of a number
-#     within its paragraph. Where that reach passes the start or the end of the text, it goes on into the
+#     branch, no bank's name and no policy, loan, card or the like (COURT_OTHER_CUE), no word that says whose
+#     record it is (PERSON_RECORD) and no character that is out of place in prose (see _is_odd). "Around" is
+#     its whole line and CONTEXT_BEFORE characters back and CONTEXT_AFTER on, blank lines included (the
+#     identity-number check reads the labels of a number within the paragraph only; here "מספר זהות", a
+#     blank line and the number was let through). Where that reach passes the start or the end of the text, it goes on into the
 #     neighbouring texts of the request (see _neighbour_has_cue): the label may be the question in the
 #     message before;
 #   - and every other place where the same digits appear in the request is released too (see scan_many).
 # A number the model reported only in part ("23456-11-1" of 23456-11-19) is judged, and released, whole.
 #
 # The price of reading that widely: a case number stays masked when the party's identity number, or a word
-# such as "העובד" or "הלקוח", is in the same paragraph, which is common in a judgment. The narrower reach this
+# such as "העובד" or "הלקוח", is within that reach, which is common in a judgment. The narrower reach this
 # rule first had (60 characters back, 20 on, its line only) let through a bank account under a table header
 # on the line above, a number followed by "... של המבוטח", and an answer to "מספר הזהות או הדרכון?".
 #
@@ -393,16 +395,32 @@ COURT_CASE_TYPES = (
     # labour
     'סע"ש', 'ס"ע', 'ע"ע', 'ד"מ', 'ד"ט', 'עב"ל', 'פ"ה', 'עס"ק', 'בר"ש',
 )
-NOT_A_PROCEEDING = frozenset(('שת"פ', 'לע"ע'))   # cooperation (ש + ת"פ), for the time being (ל + ע"ע)
-TEL_AVIV = 'ת"א'
+# Words that an attached letter makes out of a listed abbreviation: cooperation (ש + ת"פ), for the time being
+# (ל + ע"ע), the Israel Land Administration (מ + מ"י), a coordination and liaison office (מ + ת"ק), the
+# institute for technological training (מ + ה"ט).
 _QUOTE = "(?:[\"״”“]|'')"   # the mark inside an abbreviation: ", ״, typographic quotes, or two apostrophes
+NOT_A_PROCEEDING = frozenset(('שת"פ', 'לע"ע', 'ממ"י', 'מת"ק', 'מה"ט'))
+TEL_AVIV = 'ת"א'
+# ת"א is released only with a word of the courts on its line, or with the court named in the brackets after it:
+# "משכנתא שנלקחה בת"א 30412-07-19" and "איכילוב ת"א 77120-05-22" are numbers given out in Tel Aviv.
+# Left out on purpose: "תיק" (also a medical or a recruiting-office file) and a bare "שלום" (a greeting, and a
+# road in Tel Aviv).
+COURT_WORD = re.compile(
+    rf"בית\s{{1,2}}ה?משפט|(?<![{_HE}])[ובלהמשכ]{{0,2}}בי(?:ה)?מ{_QUOTE}ש|מחוזי|תביע|תובע|נתבע|נדו[ןנ]|(?<![{_HE}])נ['׳]"
+    rf"|פסק[\s־-]{{1,2}}ה?די[ןנ]|(?<![{_HE}])[ובלהמשכ]{{0,2}}פס{_QUOTE}ד|שופט|ערעור")
+COURT_IN_BRACKETS = re.compile("שלום|מחוזי|עליון|משפחה|עבודה|תעבורה")
 COURT_CASE_NUMBER = re.compile(r"[0-9]{3,6}-(?:0[1-9]|1[0-2])-[0-9]{2}|[0-9]{1,5}/[0-9]{2}")
 COURT_CASE_LENGTH = 12      # the longest text COURT_CASE_NUMBER matches: 123456-12-23
 # A branch, and the banks by name: "לאומי ת"א 12345/67" and "Leumi" in the next column say bank without the word.
 # Several are ordinary words as well (national, workers, eastern, a discount); near a number in this shape
-# that is reason enough to mask.
+# that is reason enough to mask. And the things a person holds that carry a number and are in neither of the
+# other two lists: a policy, a loan, a mortgage, a card, a visa, a payslip, a pension, a soldier's number.
+# "שכר" alone is left out: "שכר טרחת עו"ד" is in most judgments.
 COURT_OTHER_CUE = re.compile(
     rf"סניף|סניפ|branch|فرع"
+    rf"|פוליס|ביטוח|הלווא|משכנת|כרטיס|אשראי|ויזה|תלוש|משכורת|פנסי|חייל"
+    r"|polic(?:y|ies)|loan|mortgage|(?<![a-z])cards?(?![a-z])|credit|(?<![a-z])visa(?![a-z])|payslip|salary|pension|soldier"
+    r"|بوليص|قرض|ائتمان|راتب|تقاعد|جندي"
     rf"|לאומי|פועלים|דיסקונט|מזרחי|טפחות|מרכנתיל|(?<![{_HE}])ה?יהב(?![{_HE}])|אוצר\s+החייל"
     r"|leumi|poalim|discount|mizrahi|tefahot|mercantile|(?<![a-z])fibi(?![a-z])|yahav"
     r"|لئومي|ليئومي|هبوعليم|ديسكونت|مزراحي|مركنتيل", re.IGNORECASE)
@@ -415,8 +433,10 @@ _ANY_QUOTE = re.compile(_QUOTE)
 
 
 def _plain(text: str):
-    """`text` with compatibility forms folded and the marks on a letter removed, for a word search."""
-    return "".join(c for c in unicodedata.normalize("NFKC", text) if unicodedata.category(c) not in ("Mn", "Me"))
+    """`text` with compatibility forms folded and the marks on a letter and the tatweel that stretches an Arabic
+    word removed, for a word search."""
+    return "".join(c for c in unicodedata.normalize("NFKC", text)
+                   if unicodedata.category(c) not in ("Mn", "Me") and c != _TATWEEL)
 
 
 def court_case_number(text: str, a: int, b: int):
@@ -438,17 +458,24 @@ def court_case_number(text: str, a: int, b: int):
         return None
     if _ANY_QUOTE.sub('"', m.group("word")) in NOT_A_PROCEEDING:
         return None
-    if _ANY_QUOTE.sub('"', m.group("type")) == TEL_AVIV and "/" in text[s:e]:
-        return None
+    if _ANY_QUOTE.sub('"', m.group("type")) == TEL_AVIV:
+        if "/" in text[s:e]:
+            return None
+        line_end = text.find("\n", e)
+        line = _plain(text[line_start:len(text) if line_end < 0 else line_end])
+        if not (COURT_WORD.search(line) or (m.group("court") and COURT_IN_BRACKETS.search(m.group("court")))):
+            return None
     identity, person, odd, reach = _cue_positions(text)
-    (lo, hi), (label_lo, label_hi) = _cue_ranges(text, s, e)
+    # every list is read over the whole reach, blank lines included: a form's label is often a paragraph of
+    # its own ("מספר זהות", a blank line, the number)
+    (lo, hi), _within_paragraph = _cue_ranges(text, s, e)
     k = bisect.bisect_left(odd, lo)
     if k < len(odd) and odd[k] < hi:
         return None
-    if _any_between(person, lo, hi, reach) or _any_between(identity, label_lo, label_hi, reach):
+    if _any_between(person, lo, hi, reach) or _any_between(identity, lo, hi, reach):
         return None
     # no odd character is near (checked above), so folding and removing marks is all the cleaning this needs
-    if COURT_OTHER_CUE.search(_plain(text[label_lo:label_hi])):
+    if COURT_OTHER_CUE.search(_plain(text[lo:hi])):
         return None
     return s, e
 
