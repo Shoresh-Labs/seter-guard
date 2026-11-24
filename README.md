@@ -106,25 +106,43 @@ It is off by default. The rule is word lists (`REFERENCE_BEFORE`, `IDENTITY_CUE`
 
 ## Israeli court case numbers (optional rule)
 
-A court case number names a proceeding, not a person, and judgments print it. The model's id class takes the two ways such a number is written for an account number, so `ת"א 45127-09-23` comes out as `ת"א [ID]`. With `SETER_IL_COURT_CASE=1` the number is left in the text when all of these hold:
+A court case number names a proceeding, not a person, and judgments print it. The model's id class takes the two ways such a number is written for an account number, so `בג"ץ 5658/23` comes out as `בג"ץ [ID]`. With `SETER_IL_COURT_CASE=1` the number is left in the text when all of these hold:
 
 - the model labelled it as an id, and no window labelled any part of it as anything else;
-- it is written as serial-month-year (`45127-09-23`) or serial/year (`8954/11`), in plain digits, and is not a piece of a longer number;
-- the word directly before it, on its line, is the abbreviation of a kind of proceeding (`ת"א`, `ע"פ`, `בג"ץ`, `תמ"ש` and the rest of the 65 listed in `COURT_CASE_TYPES` in `server.py`), alone or with an attached ו, ב, ל, ה, מ, ש, כ, optionally followed by the court in brackets, as in `ע"פ (מחוזי ת"א)`, and by `מספר` or `מס'`;
-- no identity, passport, licence, bank, account or branch word, and no word that says whose record it is (a customer, an insured person, an employee), stands on its line within 60 characters before it or 20 after it. `ת"א` is also how Tel Aviv is written, and `חשבון בסניף ת"א 12345/67` is a bank account;
-- no character that is out of place in prose is near it on its line (the same test as for identity numbers);
+- it is written as serial-month-year (`45127-09-23`, with a serial of three digits or more: `12-05-85` is a date) or serial/year (`8954/11`), in plain digits, and is not a piece of a longer number;
+- the word directly before it, on its line, is the abbreviation of a kind of proceeding (`ע"א`, `בג"ץ`, `תמ"ש` and the rest of the 58 listed in `COURT_CASE_TYPES` in `server.py`), alone or with an attached ו, ב, ל, ה, מ, ש, כ, optionally followed by the court in brackets, as in `ע"א (מחוזי חיפה)`, and by `מספר` or `מס'`;
+- something tied to the number itself says it is a court's: its parties follow it, one to five words and then the `נ'` that stands for "versus" (`ע"א 8954/11 כהן נ' לוי`), or the brackets after the abbreviation name a kind of court together with its seat (`ע"א (מחוזי חיפה) 3345/08`). A court named elsewhere on the line does not count, nor does a `נ'` before the number, a kind of court alone in the brackets, or a seat with an attached ב (`עבודה בחיפה` is work, in Haifa);
+- no identity, passport, licence, bank, account, branch or medical word, no bank's name (`לאומי`, `דיסקונט`, `Leumi` …), no policy, insurance, loan, mortgage, card, credit, visa, payslip, pension or soldier word, and no word that says whose record it is (a customer, an insured person, an employee) is near it: on its line, or within 300 characters before it or 200 after it, blank lines included (a form's label is often a paragraph of its own);
+- where those 300 and 200 characters pass the start or the end of the text, they continue into the neighbouring texts of the request: the label may be the question in the message before the number;
+- no character that is out of place in prose is near it (the same test as for identity numbers);
 - the same digits are not masked, or left unreported, anywhere else in the request.
 
 | Text | With the rule on |
 |---|---|
-| `ת"א 45127-09-23 נדון בבית משפט השלום בתל אביב.` | left as it is |
-| `ע"פ (מחוזי ת"א) 71234-01-20 פלוני נ' מדינת ישראל` | the number is left; the model's other masks stay |
-| `בתיק ת"א 45127-09-23, התובע יוסי כהן, טלפון 054-7812345` | the number is left; the name and the phone number are masked |
+| `בתמ"ש 4412-03-22 פלונית נ' אלמוני נקבע כי המשמורת תהיה משותפת.` | the number is left |
+| `עפ"ג (מחוזי ת"א) 71234-01-20 פלוני נ' מדינת ישראל` | the number is left; the model's other masks stay |
+| `בתיק עת"מ (מחוזי חיפה) 45127-09-23, התובע יוסי כהן, טלפון 054-7812345` | the number is left; the name and the phone number are masked |
+| `בתיק עת"מ (מחוזי חיפה) 45127-09-23, התובע יוסי כהן, ת"ז 034851279` | masked: an identity number is given near it |
+| `ת"א 45127-09-23 נדון בבית משפט השלום בתל אביב.`, `ת"א 45127-09-23 כהן נ' לוי` | masked: `ת"א` is not in the list |
+| `פסק הדין בע"א 8954/11` | masked (`[ID]/11`): no parties after the number, no court and seat in the brackets |
+| `מין: נ', ע"א 3345/08`, `אחרי הדיון בבית המשפט לקחתי מרשם ד"מ 77120/25` | masked: the same |
+| `ע"א (עבודה בחיפה) 3345/08`, `ע"א (משפחה) 3345/08` | masked: not a court and its seat |
 | `תיק מספר 45127-09-23`, `תיק אזרחי 45127-09-23` | masked: words and no abbreviation |
-| `מספר חשבון 45127-09-23 בבנק לאומי`, `חשבון בנק בסניף ת"א 45127-09-23` | masked |
-| `ת"א 03-5551234`, `ת"א 45127-09-23-1` | masked: not written the way a court writes it |
+| `מספר חשבון 45127-09-23 בבנק לאומי`, `משכנתא שנלקחה בת"א 30412-07-19`, `לאומי ת"א 12345/67` | masked |
+| `מספר דרכון`, a blank line, `ע"א 12345/67 כהן נ' לוי` | masked: the label is one paragraph up |
+| `תיק ממ"י 30412/07`, `הלוואה ע"א 55120/22`, `תלוש שכר ס"ע 30412/24` | masked: the Land Administration, a loan, a payslip |
+| `ע"א 45127-09-23-1 כהן נ' לוי` | masked: not written the way a court writes it |
+| `שולם ע"פ 4411/23`, `בבי"ס 4411/23` | masked: not in the list |
 
-A number the model reported only in part (it sometimes masks `23456-11-1` of `23456-11-19`) is judged and left whole. Like the identity-number check, the rule only decides about numbers the model reported and never adds a mask; it is off by default, `GET /health` reports `il_court_case`, and every number left in the text is listed under `kept` by `/v1/redact` with the reason `il_court_case` and written to the log without its digits. Six abbreviations are left out of the list on purpose because they also label a person's or a company's number or an account: `ב"ל`, `ע"מ`, `בע"מ`, `מ"א`, `ע"ח` (also "on account of") and `ע"ש` (also "in the name of"). The two switches are independent. The table was measured with fast `v1.1.1` on transformers 4.57.6.
+**What the rule gives up.** It was reviewed four times with the real model, and each time about twenty invented sentences came out that were masked with the rule off and printed with it on. Each review narrowed it, and what is left is narrow:
+
+- `ת"א`, a civil case and the commonest kind of all, is not in the list. It is also how Tel Aviv is written, and most of what leaked was a number given out, or an account held, in Tel Aviv (`משכנתא שנלקחה בת"א 30412-07-19`, `אני גר מול בית המשפט, רחוב ויצמן 7, ת"א 6473-09-21`).
+- A bare citation is not released: in `פסק הדין בע"א 8954/11` no parties follow the number, so what the model reports of it stays masked.
+- A case number stays masked whenever the party's identity number, or a word such as `העובד` or `הלקוח`, is within the 300 and 200 characters, which is common in a judgment.
+
+**Known limit.** The rule reads words, not meaning. A number that is not a court case is still released when all of this happens at once: the model reports it as an id, it has the shape of a case number, it is written directly after a listed abbreviation, none of the words above is near it, and it is followed by one to five words and a `נ'`, or preceded by brackets that read as a court and its seat (`קוד כניסה ה"פ (עבודה חיפה) 30412/24`). The rule takes every such `נ'` for "versus", though it is also an initial (`מרשם ד"מ 77120/25 עבור נ' לוי`), female (`מין נ'`), married (`מצב משפחתי נ' + 2`), born (`רחל אברהמי נ' 12.3.1985`) and the word between two teams in a fixture (`הפועל נ' מכבי`). The number in each of these sentences is released. Nobody writes a court abbreviation after "prescription", but the rule cannot know that. A released number can also belong to a proceeding heard behind closed doors, such as a family (`תמ"ש`), guardianship or arrest (`מ"י`) case: the names beside it are still masked, but the number alone points to one person's case. Leave the rule off where a court case number in the model's hands is not worth these risks.
+
+A number the model reported only in part (it sometimes masks `23456-11-1` of `23456-11-19`) is judged and left whole. Like the identity-number check, the rule only decides about numbers the model reported and never adds a mask; it is off by default, `GET /health` reports `il_court_case`, and every number left in the text is listed under `kept` by `/v1/redact` with the reason `il_court_case` and written to the log without its digits. Also left out of the list on purpose: `ב"ל`, `ע"מ`, `בע"מ`, `מ"א`, `ע"ח` (also "on account of") and `ע"ש` (also "in the name of"), which also label a person's or a company's number or an account; and `ע"פ` (also "according to"), `י"ס` (with ב, a school), `ת"ת` (also a Talmud Torah), `ק"ג` (also kilograms) and `ס"ק` (also a sub-clause), which are also everyday words. So a criminal appeal's number (`ע"פ 1234/20`) stays masked. `שת"פ`, `לע"ע`, `ממ"י`, `מת"ק` and `מה"ט`, which an attached letter makes out of a listed abbreviation, are refused by name. The two switches are independent. The table was measured with fast `v1.1.1` on transformers 4.57.6.
 
 ## Accuracy
 
