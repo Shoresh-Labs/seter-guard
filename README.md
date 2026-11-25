@@ -158,4 +158,8 @@ On 150 held-out documents written for evaluation (support tickets, chats, emails
 
 These figures were measured with the models' own post-processing; this server uses the plain pipeline output, which can differ slightly. Earlier versions of this table (0.63 / 0.72 / 0.70 for OpenAI privacy-filter, 0.84 / 0.88 / 0.83 for Fast v1.0) were computed with a scoring bug that understated every system by 0.01-0.02.
 
+### Span offsets
+
+With the fast model on transformers 5.x, the `token-classification` pipeline often starts a span one character early (it includes the space before the word); the large model's offsets are unaffected. Seter Guard trims leading and trailing whitespace and punctuation from every reported span, for every model, before spans are merged or checked. Letters, digits and marks are never trimmed, and punctuation inside a span (the hyphen of a phone number, the `@` of an email) stays. Published REDACT and held-out scores use the models' own post-processing and can still differ slightly from this server.
+
 A redaction aid, not an anonymization guarantee. MIT licensed. Numbers and caveats: [seter-pii-he-ar](https://huggingface.co/shoresh-labs/seter-pii-he-ar) and [seter-pii-he-ar-fast](https://huggingface.co/shoresh-labs/seter-pii-he-ar-fast) model cards.

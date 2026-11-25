@@ -192,8 +192,8 @@ def test_the_window_that_owns_the_text_decides_the_type(monkeypatch):
         return [{"entity_group": "private_phone", "score": 0.9, "start": 3, "end": 13, "owner": False},
                 {"entity_group": "account_number", "score": 0.9, "start": 4, "end": 13, "owner": True}]
     monkeypatch.setattr(server, "entities", fake)
-    assert server.spans(text) == [(3, 13, "ID")]
-    assert server.mask(text)[0] == "ID [ID]) on file"
+    assert server.spans(text) == [(4, 13, "ID")]   # the bracket the union started with is trimmed
+    assert server.mask(text)[0] == "ID ([ID]) on file"
 
 
 def test_tokens_not_characters_decide_whether_a_text_needs_windows(monkeypatch):
@@ -930,3 +930,87 @@ def test_a_released_case_number_is_logged_without_its_digits(monkeypatch, caplog
     a = text.index(CASE_NO)
     assert len(lines) == 1 and "il_court_case" in lines[0] and f"characters {a}-{a + len(CASE_NO)}" in lines[0]
     assert not any(part in lines[0] for part in ("45127", "09-23"))
+
+
+# ---- span trimming (fast model + transformers 5.x starts spans one character early) ----
+
+def _stub_ner(monkeypatch, text, pieces, group="private_person"):
+    """Stand in for the token-classification pipeline: pieces are (start, end) as the pipeline would report them."""
+    monkeypatch.setattr(server, "ner", lambda t, **_k: [
+        {"entity_group": group, "score": 0.99, "start": a, "end": b, "word": t[a:b]} for a, b in pieces])
+
+
+@pytest.mark.parametrize("text,name,group", [
+    ("שלום, קוראים לי יוסי כהן היום", "יוסי כהן", "private_person"),
+    ("يا صديقي، اسمي سامر الخطيب اليوم", "سامر الخطيب", "private_person"),
+    ("My name is John Smith today", "John Smith", "private_person"),
+])
+@pytest.mark.parametrize("shift_start,shift_end", [(-1, 0), (0, 1), (-1, 1)])
+def test_a_span_with_a_stray_space_is_trimmed(monkeypatch, text, name, group, shift_start, shift_end):
+    a = text.index(name)
+    b = a + len(name)
+    _stub_ner(monkeypatch, text, [(a + shift_start, b + shift_end)], group)
+    assert text[a - 1] == " "
+    assert server.spans(text) == [(a, b, "PERSON")]
+    out, found = server.mask(text)
+    assert out == text[:a] + "[PERSON]" + text[b:]
+    assert found == [{"type": "PERSON", "start": a, "end": b}]
+
+
+def test_wrapping_punctuation_is_trimmed_but_inner_punctuation_is_kept(monkeypatch):
+    text = 'Call "054-7812345", or mail (dana.k@example.com).'
+    phone = text.index("054")
+    mail = text.index("dana")
+    _stub_ner(monkeypatch, text, [(phone - 1, phone + 11), (mail - 1, mail + len("dana.k@example.com") + 1)], "private_phone")
+    assert server.spans(text) == [(phone, phone + 11, "PHONE"), (mail, mail + len("dana.k@example.com"), "PHONE")]
+    assert server.mask(text)[0] == 'Call "[PHONE]", or mail ([PHONE]).'
+
+
+def test_a_phone_keeps_its_plus_and_a_span_of_only_punctuation_is_dropped(monkeypatch):
+    text = "Reach me on +972-54-7812345 ok"
+    a = text.index("+")
+    _stub_ner(monkeypatch, text, [(a - 1, a + 15), (len(text) - 3, len(text) - 2)], "private_phone")
+    assert server.spans(text) == [(a, a + 15, "PHONE")]
+    _stub_ner(monkeypatch, "a - b", [(1, 4)])
+    assert server.spans("a - b") == []
+
+
+def test_a_correct_span_is_left_alone(monkeypatch):
+    text = "שלום, קוראים לי יוסי כהן, הטלפון 054-7812345"
+    a, p = text.index("יוסי"), text.index("054")
+    pieces = [(a, a + 8), (p, p + 11)]
+    monkeypatch.setattr(server, "ner", lambda t, **_k: [
+        {"entity_group": g, "score": 0.99, "start": x, "end": y} for g, (x, y) in zip(["private_person", "private_phone"], pieces)])
+    assert server.entities(text) == [
+        {"entity_group": "private_person", "score": 0.99, "start": a, "end": a + 8, "owner": True},
+        {"entity_group": "private_phone", "score": 0.99, "start": p, "end": p + 11, "owner": True}]
+    assert server.mask(text)[0] == "שלום, קוראים לי [PERSON], הטלפון [PHONE]"
+
+
+def test_trimmed_neighbours_still_merge_and_digits_still_expand(monkeypatch):
+    text = "يا أبو خالد اتصل 0559023417"
+    a = text.index("أبو")
+    k = text.index("خالد")
+    _stub_ner(monkeypatch, text, [(a - 1, k - 1), (k - 1, k + 4)])
+    assert server.spans(text) == [(a, k + 4, "PERSON")]
+    t2 = "tel 0559023417 now"
+    d = t2.index("0559")
+    _stub_ner(monkeypatch, t2, [(d - 1, d + 5)], "private_phone")
+    assert server.spans(t2) == [(d, d + 10, "PHONE")]
+
+
+def test_trim_also_applies_to_windowed_texts(monkeypatch):
+    text = "x " * 3000 + "Dana Levi"
+    wins = server.windows(text)
+    assert len(wins) > 1
+    a = text.index("Dana")
+
+    def fake(chunks, **_k):
+        out = []
+        for (wa, wb, *_r), chunk in zip(wins, chunks):
+            hit = chunk.find("Dana Levi")
+            out.append([{"entity_group": "private_person", "score": 0.99, "start": hit - 1, "end": hit + 9, "word": ""}]
+                       if hit >= 0 else [])
+        return out
+    monkeypatch.setattr(server, "ner", fake)
+    assert server.spans(text) == [(a, a + 9, "PERSON")]

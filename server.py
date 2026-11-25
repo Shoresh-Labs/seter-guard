@@ -647,18 +647,37 @@ def count_tokens(text: str):
     return len(wtok(text, add_special_tokens=False, verbose=False)["input_ids"])
 
 
+def _trim(text: str, s: int, t: int):
+    """(s, t) narrowed so that text[s:t] neither starts nor ends with whitespace or punctuation. Some pipeline
+    versions start a span one character early (the space before the word); a span can also swallow a trailing
+    space or a wrapping quote or bracket. Letters, digits and marks are never trimmed, and neither are symbols
+    such as the + of a phone number; punctuation inside the span (the hyphen of a phone number, the @ of an
+    email) is not touched. An empty result (s >= t) means the span was only whitespace and punctuation."""
+    def edge(c):
+        return c.isspace() or unicodedata.category(c).startswith("P")
+    while s < t and edge(text[s]):
+        s += 1
+    while t > s and edge(text[t - 1]):
+        t -= 1
+    return s, t
+
+
 def entities(text: str):
     """Model output for the whole text, with character offsets into `text` and an "owner" flag (see windows)."""
     wins = windows(text)
     if len(wins) == 1:
-        return [{**e, "owner": True} for e in ner(text)]
+        out = []
+        for e in ner(text):
+            s, t = _trim(text, e["start"], e["end"])
+            if s < t:
+                out.append({**e, "start": s, "end": t, "owner": True})
+        return out
     out = []
     results = ner([text[a:b] for a, b, *_ in wins], batch_size=BATCH)
     for (a, _b, trust_from, trust_to, own_from, own_to), found in zip(wins, results):
         for e in found:
             s, t = e["start"] + a, e["end"] + a
-            while s < t and text[s].isspace():  # the pipeline may include the space before a word
-                s += 1
+            s, t = _trim(text, s, t)  # the pipeline may include the space before a word (see _trim)
             # Dropped: what lies wholly in the untrusted strip after a cut (seen without its left context; the
             # previous window has it), and what starts in the strip before the next cut. Kept: anything that
             # reaches into the trusted zone, so a long entity that begins just after a cut is never lost.
@@ -680,8 +699,7 @@ def _detect(text: str):
             doubts.append((e["start"], e["end"], TAGS.get(e["entity_group"], "PII")))
             continue
         a, b, t = e["start"], e["end"], TAGS.get(e["entity_group"], "PII")
-        while a < b and text[a].isspace():
-            a += 1
+        a, b = _trim(text, a, b)
         if a >= b:
             continue
         # The model sometimes reports only some digits of a number ("[ID]3485[ID]2"). A number is masked whole.
