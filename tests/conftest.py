@@ -4,5 +4,4 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.pop("SETER_IL_ID_CHECK", None)
 os.environ.pop("SETER_IL_COURT_CASE", None)
 os.environ.pop("SETER_ENTITY_PRESET", None)
-# The existing tests state what the model alone gives; the decoder (calibration, clean-up) is tested on its own.
-os.environ["SETER_DECODER"] = "none"
+os.environ.pop("SETER_DECODER", None)

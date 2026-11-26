@@ -100,11 +100,14 @@ ENTITY_PRESET = _entity_preset()
 
 
 def _decoder():
-    """SETER_DECODER: `default` (or unset) applies the published decoder's account-number calibration (fast model) and
-    clean-up; `none` is the behaviour before the decoder was added."""
-    value = os.environ.get("SETER_DECODER", "").strip().lower() or "default"
+    """SETER_DECODER: `none` (or unset) is strict masking, the behaviour before the decoder was added; `default` (alias
+    `cleanup`) applies the published decoder's account-number calibration (fast model) and clean-up. Reported as
+    `default` or `none`."""
+    value = os.environ.get("SETER_DECODER", "").strip().lower() or "none"
+    if value == "cleanup":
+        value = "default"
     if value not in ("default", "none"):
-        raise ValueError(f"SETER_DECODER={value!r}: use one of default, none")
+        raise ValueError(f"SETER_DECODER={value!r}: use one of none, default, cleanup")
     return value
 
 

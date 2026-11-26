@@ -146,7 +146,7 @@ A number the model reported only in part (it sometimes masks `23456-11-1` of `23
 
 ## Decoder (`SETER_DECODER`)
 
-The model cards publish a decoder, `seter_entities.py` 1.1.0, and their REDACT and held-out figures are measured with it. `SETER_DECODER=default` (also when unset) applies it, so seter-guard matches those figures; `none` restores the previous behaviour exactly. Any other value stops the server at start. `GET /health` reports `decoder` and `entity_preset`.
+Strict masking is the default (`SETER_DECODER=none`, also when unset), because seter-guard sits in front of outbound LLM traffic: no calibration and no clean-up, so everything the model reports is masked. The model cards publish a decoder, `seter_entities.py` 1.1.0, and their REDACT and held-out figures are measured with it. `SETER_DECODER=default` (alias `cleanup`) applies it, so seter-guard matches those figures; it leaves dates/times and order-style codes in the text. Any other value stops the server at start. `GET /health` reports `decoder` and `entity_preset`.
 
 - **Calibration.** At load, for the fast model (`modernbert`, the default) the bias of the `B-account_number` and `I-account_number` outputs is lowered by 1.0, once. The large model (`xlm-roberta`) is not changed. This applies to a local folder and a Hub repo alike.
 - **Clean-up of `[ID]` spans.** Left in the text: full dates and times (`12/08/1979`, `2026-03-15`, `09:14`), and a number whose nearest word in the 24 characters before it names a non-personal code (order, invoice, ticket, reference, case, tracking, SKU, version, booking, ... in Hebrew, Arabic and English: `הזמנה 2291847`, `فاتورة 99812`, `invoice #2291847`) when no identity word is as close. IBAN, card-like and passport shapes are always masked.

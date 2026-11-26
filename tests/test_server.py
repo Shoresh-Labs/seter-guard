@@ -1244,8 +1244,8 @@ def test_decoder_bad_value_stops_the_server(monkeypatch):
     monkeypatch.setenv("SETER_DECODER", "foo")
     with pytest.raises(ValueError, match="SETER_DECODER"):
         server._decoder()
-    for value, want in (("none", "none"), ("default", "default"), ("", "default"), ("NONE", "none")):
+    for value, want in (("none", "none"), ("default", "default"), ("cleanup", "default"), ("", "none"), ("NONE", "none")):
         monkeypatch.setenv("SETER_DECODER", value)
         assert server._decoder() == want
     monkeypatch.delenv("SETER_DECODER")
-    assert server._decoder() == "default"
+    assert server._decoder() == "none"
