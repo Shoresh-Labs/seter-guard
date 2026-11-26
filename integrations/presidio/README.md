@@ -26,7 +26,7 @@ analyzer.analyze(text="...", language="ar")
 analyzer.analyze(text="...", language="en")
 ```
 
-`HuggingFaceNerRecognizer` accepts a single `supported_language`, so one recognizer is registered per language (`he`, `ar`, `en`). They share one loaded pipeline, so the model is loaded once. If `language` does not match a registered recognizer, Presidio raises `ValueError: No matching recognizers were found to serve the request.`
+`HuggingFaceNerRecognizer` accepts a single `supported_language`, so one recognizer is registered per language (`he`, `ar`, `en`). A thin subclass overrides `load()` so all three share a single pipeline built on the first call (Presidio's constructor always calls `load()`, so assigning the pipeline afterwards would still load the model three times). If `language` does not match a registered recognizer, Presidio raises `ValueError: No matching recognizers were found to serve the request.`
 
 Run the bundled sample: `python seter_hf_recognizer.py`.
 
@@ -50,6 +50,6 @@ In production, pin a revision (`v1.2` for large, `v1.1.1` for fast). Presidio's 
 
 ## Caveat: fast model span offsets
 
-On transformers 5.24.1 the fast model's pipeline often starts a span one character early (a leading space; 36 of 50 rows in our check). The large model was unaffected. Trim leading and trailing whitespace and punctuation on returned spans before using them. This repo's server does a leading-space trim; a fuller trim is tracked separately.
+On transformers 5.24.1 the fast model's pipeline often starts a span one character early (a leading space; 36 of 50 rows in our check). The large model was unaffected. Trim leading and trailing whitespace and punctuation on returned spans before using them. See the server's `_trim()` in this repo for a reference implementation.
 
 This is a redaction aid, not an anonymization guarantee.

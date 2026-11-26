@@ -2,7 +2,8 @@
 
 Uses HuggingFaceNerRecognizer and NoOpNlpEngine. One recognizer is
 registered per language (he, ar, en) because HuggingFaceNerRecognizer
-accepts a single supported_language; they share one loaded pipeline.
+accepts a single supported_language; a thin subclass makes them share one
+pipeline, so the model is built only once.
 """
 
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
@@ -21,23 +22,39 @@ MODEL_ID = "shoresh-labs/seter-pii-he-ar"  # or shoresh-labs/seter-pii-he-ar-fas
 LANGS = ["he", "ar", "en"]
 
 
+def _shared_recognizer_class(shared: dict):
+    """Build a recognizer class whose load() reuses one pipeline stored in `shared`.
+
+    EntityRecognizer.__init__ always calls self.load(), so assigning
+    ner_pipeline after construction would still build a full pipeline per
+    recognizer. Overriding load() makes the first call build it and the
+    rest reuse it.
+    """
+
+    class SharedPipelineRecognizer(HuggingFaceNerRecognizer):
+        def load(self):
+            if "pipeline" not in shared:
+                super().load()
+                shared["pipeline"] = self.ner_pipeline
+            else:
+                self.ner_pipeline = shared["pipeline"]
+
+    return SharedPipelineRecognizer
+
+
 def create_analyzer(model_name: str = MODEL_ID) -> AnalyzerEngine:
-    shared_pipeline = None
+    recognizer_cls = _shared_recognizer_class({})
     registry = RecognizerRegistry(supported_languages=LANGS)
     for lang in LANGS:
-        recognizer = HuggingFaceNerRecognizer(
-            model_name=model_name,
-            name=f"SeterRecognizer_{lang}",
-            supported_language=lang,
-            label_mapping=LABEL_MAPPING,
-            aggregation_strategy="simple",
+        registry.add_recognizer(
+            recognizer_cls(
+                model_name=model_name,
+                name=f"SeterRecognizer_{lang}",
+                supported_language=lang,
+                label_mapping=LABEL_MAPPING,
+                aggregation_strategy="simple",
+            )
         )
-        if shared_pipeline is None:
-            recognizer.load()
-            shared_pipeline = recognizer.ner_pipeline
-        else:
-            recognizer.ner_pipeline = shared_pipeline
-        registry.add_recognizer(recognizer)
 
     return AnalyzerEngine(
         nlp_engine=NoOpNlpEngine(
