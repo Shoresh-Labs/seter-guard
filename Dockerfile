@@ -2,7 +2,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
-COPY server.py .
+COPY server.py entities.py ./
 # repo@version. Another model: docker build --build-arg SETER_MODEL=shoresh-labs/seter-pii-he-ar@v1.2 .
 ARG SETER_MODEL=shoresh-labs/seter-pii-he-ar-fast@v1.1.1
 ENV SETER_MODEL=$SETER_MODEL SETER_BAKED_MODEL=$SETER_MODEL

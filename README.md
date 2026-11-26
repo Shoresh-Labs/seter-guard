@@ -144,6 +144,15 @@ A court case number names a proceeding, not a person, and judgments print it. Th
 
 A number the model reported only in part (it sometimes masks `23456-11-1` of `23456-11-19`) is judged and left whole. Like the identity-number check, the rule only decides about numbers the model reported and never adds a mask; it is off by default, `GET /health` reports `il_court_case`, and every number left in the text is listed under `kept` by `/v1/redact` with the reason `il_court_case` and written to the log without its digits. Also left out of the list on purpose: `ב"ל`, `ע"מ`, `בע"מ`, `מ"א`, `ע"ח` (also "on account of") and `ע"ש` (also "in the name of"), which also label a person's or a company's number or an account; and `ע"פ` (also "according to"), `י"ס` (with ב, a school), `ת"ת` (also a Talmud Torah), `ק"ג` (also kilograms) and `ס"ק` (also a sub-clause), which are also everyday words. So a criminal appeal's number (`ע"פ 1234/20`) stays masked. `שת"פ`, `לע"ע`, `ממ"י`, `מת"ק` and `מה"ט`, which an attached letter makes out of a listed abbreviation, are refused by name. The two switches are independent. The table was measured with fast `v1.1.1` on transformers 4.57.6.
 
+## Entity selection (optional)
+
+`SETER_ENTITY_PRESET` picks which `[ID]` spans (the model's `account_number` class) are masked. `default`, or unset, changes nothing. `strict-ids` masks only identity and financial numbers. Person, address, phone and email spans are never affected. Any other value stops the server at start. `GET /health` reports `entity_preset`. The logic is `entities.py`, a copy of `seter_entities.py` v1.0.0 (MIT) from the model repos; see "Entity selection (optional)" in the [model card](https://huggingface.co/shoresh-labs/seter-pii-he-ar#entity-selection-optional). It is not tuned here, so the published figures apply.
+
+- **Still masked:** national / identity numbers (including Israeli Teudat Zehut), passport numbers, driving licence numbers, payment card numbers (also masked and last-4 forms such as `****1234`, "ending in 1234"), tax ids, bank account numbers, IBANs.
+- **Left in the text:** customer / client / user / member ids, employee / staff ids, student ids, patient ids and medical-file numbers, insurance policy numbers, professional licence numbers, reference-style codes (order, invoice, ticket, case, claim, booking, tracking, transaction, including `INV-2024-0042`), card expiry dates and full dates or times.
+
+A number the preset leaves is listed under `kept` by `/v1/redact` with the reason `strict_ids` and logged by position only. It follows the same rules as the other checks: if the same digits are masked anywhere else in the request they stay masked, and a span that any window called something else is never left. `SETER_IL_ID_CHECK` and `SETER_IL_COURT_CASE` work as before; the preset only ever leaves more `[ID]` spans, never masks one they leave.
+
 ## Accuracy
 
 Character-level F1 on the Hebrew, Arabic and English records of the REDACT benchmark:

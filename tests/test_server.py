@@ -1014,3 +1014,99 @@ def test_trim_also_applies_to_windowed_texts(monkeypatch):
         return out
     monkeypatch.setattr(server, "ner", fake)
     assert server.spans(text) == [(a, a + 9, "PERSON")]
+
+
+# ---- entity-selection preset (SETER_ENTITY_PRESET) ----
+
+def _numbers_as_ids(*needles):
+    """A fake model that reports each needle, wherever it stands in the text, as an account_number."""
+    def reports(t):
+        return [(m.start(), m.end(), "account_number", 0.9, True, {}) for n in needles for m in __import__("re").finditer(__import__("re").escape(n), t)]
+    return reports
+
+
+def _strict(monkeypatch, *needles):
+    monkeypatch.setattr(server, "ENTITY_PRESET", "strict-ids")
+    _fake_entities(monkeypatch, _numbers_as_ids(*needles))
+
+
+def test_entity_preset_default_changes_nothing(monkeypatch):
+    texts = ['ת"ז 039876541, מספר לקוח 448812', "MRN 5523190", "Order INV-2024-0042"]
+    needles = ("039876541", "448812", "5523190", "INV-2024-0042")
+    _fake_entities(monkeypatch, _numbers_as_ids(*needles))
+    monkeypatch.delenv("SETER_ENTITY_PRESET", raising=False)
+    assert server._entity_preset() == "default"
+    monkeypatch.setattr(server, "ENTITY_PRESET", "default")
+    before = [(server.scan(t), server.mask(t)) for t in texts]
+    monkeypatch.setenv("SETER_ENTITY_PRESET", "default")
+    assert server._entity_preset() == "default"
+    assert before == [(server.scan(t), server.mask(t)) for t in texts]
+    assert all(k == [] for (_m, k), _ in before) and all("[ID]" in m for _, (m, _f) in before)
+
+
+def test_entity_preset_bad_value_stops_the_server(monkeypatch):
+    monkeypatch.setenv("SETER_ENTITY_PRESET", "foo")
+    with pytest.raises(ValueError, match="SETER_ENTITY_PRESET"):
+        server._entity_preset()
+    monkeypatch.setenv("SETER_ENTITY_PRESET", "strict-ids")
+    assert server._entity_preset() == "strict-ids"
+
+
+def test_entity_preset_hebrew_arabic_english(monkeypatch):
+    cases = [  # (text, number reported as an id, masked under strict-ids)
+        ('ת"ז 039876541, מספר לקוח 448812', "039876541", True),
+        ('ת"ז 039876541, מספר לקוח 448812', "448812", False),
+        ("מספר פוליסה 99812345", "99812345", False),
+        ("דרכון 12345678", "12345678", True),
+        ("رقم الهوية 912345678، رقم العميل 7781234", "912345678", True),
+        ("رقم الهوية 912345678، رقم العميل 7781234", "7781234", False),
+        ("رقم الموظف 55102", "55102", False),
+        ("MRN 5523190", "5523190", False),
+        ("passport X1234567", "X1234567", True),
+        ("card ending 4821 exp 09/27", "4821", True),
+        ("card ending 4821 exp 09/27", "09/27", False),
+        ("IBAN IL620108000000099999999", "IL620108000000099999999", True),
+        ("Order INV-2024-0042", "INV-2024-0042", False),
+    ]
+    for text, number, masked in cases:
+        _strict(monkeypatch, number)
+        to_mask, kept = server.scan(text)
+        assert ([text[a:b] for a, b, _t in to_mask], [text[a:b] for a, b, _t in kept]) == (([number], []) if masked else ([], [number])), (text, number)
+        out = server.mask(text)[0]
+        assert (number not in out) == masked, (text, number, out)
+
+
+def test_entity_preset_table_columns(monkeypatch):
+    text = "name,customer_id,national_id\nDana,448812,039876541"
+    _strict(monkeypatch, "448812", "039876541")
+    out = server.mask(text)[0]
+    assert "448812" in out and "039876541" not in out and "[ID]" in out
+
+
+def test_entity_preset_copy_rule_and_reason(monkeypatch):
+    _strict(monkeypatch, "448812")
+    alone = "customer id 448812"
+    assert server.scan(alone) == ([], [(12, 18, "ID")])
+    r = c.post("/v1/redact", json={"text": alone}).json()
+    assert r["text"] == alone and r["kept"] == [{"type": "ID", "start": 12, "end": 18, "reason": "strict_ids"}]
+    both = "customer id 448812\nID number 448812"          # the same digits are an identity number here: masked in both places
+    masked, kept = server.scan(both)
+    assert kept == [] and len(masked) == 2 and "448812" not in server.mask(both)[0]
+    r = c.post("/beta/litellm_basic_guardrail_api", json={"texts": [alone, "ID number 448812"]}).json()
+    assert r["action"] == "GUARDRAIL_INTERVENED" and not any("448812" in t for t in r["texts"])
+    assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [alone]}).json() == {"action": "NONE"}
+
+
+def test_entity_preset_never_releases_a_span_another_window_doubts(monkeypatch):
+    _strict(monkeypatch, "448812")
+    text = "customer id 448812"
+    main = (12, 18, "account_number", 0.9, True, {})
+    _fake_entities(monkeypatch, lambda _t: [main, (12, 18, "private_phone", 0.9, False, {})])
+    assert server.scan(text) == ([(12, 18, "ID")], [])
+
+
+def test_entity_preset_leaves_other_types_alone(monkeypatch):
+    monkeypatch.setattr(server, "ENTITY_PRESET", "strict-ids")
+    text = "customer name Dana 054-7812345"
+    _fake_entities(monkeypatch, lambda t: [(14, 18, "private_person", 0.9, True, {}), (19, 30, "private_phone", 0.9, True, {})])
+    assert server.scan(text) == ([(14, 18, "PERSON"), (19, 30, "PHONE")], [])
