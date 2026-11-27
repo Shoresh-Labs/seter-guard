@@ -1110,3 +1110,142 @@ def test_entity_preset_leaves_other_types_alone(monkeypatch):
     text = "customer name Dana 054-7812345"
     _fake_entities(monkeypatch, lambda t: [(14, 18, "private_person", 0.9, True, {}), (19, 30, "private_phone", 0.9, True, {})])
     assert server.scan(text) == ([(14, 18, "PERSON"), (19, 30, "PHONE")], [])
+
+
+# ---- decoder (SETER_DECODER): account clean-up and calibration ----
+
+def _decoder_on(monkeypatch, *needles):
+    monkeypatch.setattr(server, "DECODER", "default")
+    _fake_entities(monkeypatch, _numbers_as_ids(*needles))
+
+
+def test_decoder_none_is_the_suite_default_and_reported():
+    assert server.DECODER == "none"
+    assert c.get("/health").json()["decoder"] == "none" and c.get("/health").json()["entity_preset"] == "default"
+
+
+def test_decoder_none_leaves_dates_and_order_codes_masked(monkeypatch):
+    monkeypatch.setattr(server, "DECODER", "none")
+    for text, number in (("date 2026-03-15", "2026-03-15"), ("הזמנה 2291847", "2291847"), ("invoice #2291847", "2291847")):
+        _fake_entities(monkeypatch, _numbers_as_ids(number))
+        assert server.scan(text)[1] == [] and number not in server.mask(text)[0]
+
+
+@pytest.mark.parametrize("text,number", [
+    ("born 12/08/1979", "12/08/1979"), ("date 2026-03-15", "2026-03-15"), ("at 09:14", "09:14"),
+    ("הזמנה 2291847", "2291847"), ("فاتورة 99812", "99812"), ("invoice #2291847", "2291847")])
+def test_decoder_clean_up_leaves_dates_and_order_codes(monkeypatch, text, number):
+    _decoder_on(monkeypatch, number)
+    a = text.index(number)
+    assert server.scan(text) == ([], [(a, a + len(number), "ID")])
+    r = c.post("/v1/redact", json={"text": text}).json()
+    assert r["text"] == text and r["kept"] == [{"type": "ID", "start": a, "end": a + len(number), "reason": "account_cleanup"}]
+    assert c.post("/beta/litellm_basic_guardrail_api", json={"texts": [text]}).json() == {"action": "NONE"}
+
+
+@pytest.mark.parametrize("text,number", [
+    ('ת"ז 039876541', "039876541"), ("IBAN IL620108000000099999999", "IL620108000000099999999"),
+    ("order 4580 1234 5678 9012", "4580 1234 5678 9012"), ("order card 4580 1234 5678 9012", "4580 1234 5678 9012"),
+    ("order passport X1234567", "X1234567"), ("passport X1234567", "X1234567"),
+    ("order 2291847 ID 039876541", "039876541")])
+def test_decoder_clean_up_keeps_personal_numbers_masked(monkeypatch, text, number):
+    _decoder_on(monkeypatch, number)
+    to_mask, kept = server.scan(text)
+    assert [text[a:b] for a, b, _t in to_mask] == [number] and kept == []
+    assert number not in server.mask(text)[0]
+
+
+def test_decoder_clean_up_keeps_the_span_bounds_of_what_stays_masked(monkeypatch):
+    text = 'ת"ז (039876541)'
+    a = text.index("039876541")
+    monkeypatch.setattr(server, "DECODER", "default")
+    _fake_entities(monkeypatch, lambda _t: [(a - 1, a + 10, "account_number", 0.9, True, {})])
+    assert server.scan(text) == ([(a, a + 9, "ID")], [])    # the trim of seter-guard, not the decoder's, decides the bounds
+
+
+def test_decoder_copy_rule_and_doubt(monkeypatch):
+    _decoder_on(monkeypatch, "2291847")
+    both = "invoice #2291847\nת\"ז 2291847"                  # the same digits are masked elsewhere: masked everywhere
+    masked, kept = server.scan(both)
+    assert kept == [] and len(masked) == 2 and "2291847" not in server.mask(both)[0]
+    r = c.post("/beta/litellm_basic_guardrail_api", json={"texts": ["invoice #2291847", 'ת"ז 2291847']}).json()
+    assert r["action"] == "GUARDRAIL_INTERVENED" and not any("2291847" in t for t in r["texts"])
+    text = "invoice #2291847"                                  # a span another window called something else is not left
+    a = text.index("2291847")
+    _fake_entities(monkeypatch, lambda _t: [(a, a + 7, "account_number", 0.9, True, {}), (a, a + 7, "private_phone", 0.9, False, {})])
+    assert server.scan(text) == ([(a, a + 7, "ID")], [])
+
+
+def test_decoder_clean_up_is_logged_by_position_only(monkeypatch, caplog):
+    _decoder_on(monkeypatch, "2291847")
+    with caplog.at_level("INFO", logger="seter_guard"):
+        server.scan("invoice #2291847")
+    assert "account_cleanup" in caplog.text and "2291847" not in caplog.text
+
+
+@pytest.mark.parametrize("text,number", [
+    ('ת"ז 039876541, מספר לקוח 448812', "448812"), ('ת"ז 039876541, מספר לקוח 448812', "039876541"),
+    ("رقم الهوية 912345678، رقم العميل 7781234", "7781234"), ("رقم الهوية 912345678، رقم العميل 7781234", "912345678"),
+    ("فاتورة 99812", "99812"), ("הזמנה 2291847", "2291847"), ("born 12/08/1979", "12/08/1979"),
+    ("MRN 5523190", "5523190"), ("card ending 4821 exp 09/27", "09/27"), ("card ending 4821 exp 09/27", "4821"),
+    ("Order INV-2024-0042", "INV-2024-0042"), ("passport X1234567", "X1234567"), ("invoice #2291847", "2291847")])
+def test_decoder_with_strict_ids_equals_select_spans(monkeypatch, text, number):
+    from entities import select_spans
+    _decoder_on(monkeypatch, number)
+    monkeypatch.setattr(server, "ENTITY_PRESET", "strict-ids")
+    a = text.index(number)
+    expected = bool(select_spans(text, [(a, a + len(number), "account_number")], "strict-ids"))
+    to_mask, kept = server.scan(text)
+    assert bool(to_mask) == expected and bool(kept) == (not expected)
+
+
+def test_decoder_reasons_with_strict_ids(monkeypatch):
+    _decoder_on(monkeypatch, "2291847", "448812")
+    monkeypatch.setattr(server, "ENTITY_PRESET", "strict-ids")
+    reason = lambda text: c.post("/v1/redact", json={"text": text}).json()["kept"][0]["reason"]
+    assert reason("invoice #2291847") == "account_cleanup" and reason("customer id 448812") == "strict_ids"
+
+
+def test_decoder_none_with_strict_ids_is_as_before(monkeypatch):
+    monkeypatch.setattr(server, "DECODER", "none")
+    _strict(monkeypatch, "2291847")
+    r = c.post("/v1/redact", json={"text": "invoice #2291847"}).json()
+    assert r["kept"][0]["reason"] == "strict_ids"
+
+
+def _tiny_model(model_type):
+    import types, torch
+    head = torch.nn.Linear(4, 5)
+    torch.nn.init.zeros_(head.bias)
+    labels = {0: "O", 1: "B-private_person", 2: "B-account_number", 3: "I-account_number", 4: "B-private_phone"}
+    return types.SimpleNamespace(config=types.SimpleNamespace(model_type=model_type, id2label=labels), classifier=head)
+
+
+def test_calibrate_lowers_the_account_bias_once_on_modernbert():
+    model = _tiny_model("modernbert")
+    server.calibrate(model)
+    server.calibrate(model)                                   # a second call changes nothing
+    assert model.classifier.bias.tolist() == [0.0, 0.0, -1.0, -1.0, 0.0]
+
+
+def test_calibrate_does_nothing_on_xlm_roberta():
+    model = _tiny_model("xlm-roberta")
+    server.calibrate(model)
+    assert model.classifier.bias.tolist() == [0.0] * 5
+
+
+def test_decoder_none_skips_calibration_and_the_loaded_model_follows_the_switch():
+    src = open(server.__file__, encoding="utf-8").read()
+    assert 'if DECODER == "default":\n    calibrate(ner.model)' in src
+    assert server.DECODER == "none" and not getattr(server.ner.model, "_seter_calibrated", False)
+
+
+def test_decoder_bad_value_stops_the_server(monkeypatch):
+    monkeypatch.setenv("SETER_DECODER", "foo")
+    with pytest.raises(ValueError, match="SETER_DECODER"):
+        server._decoder()
+    for value, want in (("none", "none"), ("default", "default"), ("cleanup", "default"), ("", "none"), ("NONE", "none")):
+        monkeypatch.setenv("SETER_DECODER", value)
+        assert server._decoder() == want
+    monkeypatch.delenv("SETER_DECODER")
+    assert server._decoder() == "none"

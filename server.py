@@ -9,7 +9,7 @@ from functools import lru_cache
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
-from entities import PRESETS, select_spans
+from entities import calibrate, select_spans
 
 # v1.1.1 = the v1.1 weights with a config.json that transformers 4.x reads correctly. With v1.1 and
 # transformers 4.x the local-attention layers silently used the wrong rotary-position setting and the
@@ -91,16 +91,35 @@ ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
 def _entity_preset():
     """SETER_ENTITY_PRESET: `default` (or unset) changes nothing; `strict-ids` leaves non-identity numbers in the text."""
     value = os.environ.get("SETER_ENTITY_PRESET", "").strip().lower() or "default"
-    if value not in PRESETS:
-        raise ValueError(f"SETER_ENTITY_PRESET={value!r}: use one of {', '.join(PRESETS)}")
+    if value not in ("default", "strict-ids"):
+        raise ValueError(f"SETER_ENTITY_PRESET={value!r}: use one of default, strict-ids")
     return value
 
 
 ENTITY_PRESET = _entity_preset()
 
 
+def _decoder():
+    """SETER_DECODER: `none` (or unset) is strict masking, the behaviour before the decoder was added; `default` (alias
+    `cleanup`) applies the published decoder's account-number calibration (fast model) and clean-up. Reported as
+    `default` or `none`."""
+    value = os.environ.get("SETER_DECODER", "").strip().lower() or "none"
+    if value == "cleanup":
+        value = "default"
+    if value not in ("default", "none"):
+        raise ValueError(f"SETER_DECODER={value!r}: use one of none, default, cleanup")
+    return value
+
+
+DECODER = _decoder()
+
+
 class _StrictIds(tuple):
     """A (start, end, type) span that the strict-ids preset released. Equal to the plain tuple; it only carries the reason."""
+
+
+class _AccountCleanup(tuple):
+    """A (start, end, type) span that the decoder's account clean-up released (a date, a time, an order-style code)."""
 
 
 # ---- Israeli identity numbers ------------------------------------------------------------------------
@@ -550,10 +569,14 @@ def release_reason(text: str, a: int, b: int, span=None):
     """Which check left text[a:b] in the text: the first two never apply to the same span (nine bare digits, or not)."""
     if isinstance(span, _StrictIds):
         return "strict_ids"
+    if isinstance(span, _AccountCleanup):
+        return "account_cleanup"
     return "il_id_check" if il_id_check(text[a:b]) is not None else "il_court_case"
 
 
 ner = pipeline("token-classification", model=MODEL, revision=COMMIT, aggregation_strategy="simple")
+if DECODER == "default":
+    calibrate(ner.model)  # fast model: account-number bias -1.0, once; the large model is left as it is
 app = FastAPI(title="Seter Guard")
 
 # ---- long texts -------------------------------------------------------------------------------------
@@ -706,6 +729,11 @@ def entities(text: str):
     return out
 
 
+def _cleanup_drops(text: str, a: int, b: int):
+    """The decoder's account clean-up leaves text[a:b] (an [ID] span) in the text: a date or time, or an order-style code."""
+    return not select_spans(text, [(a, b, "account_number")], "default")
+
+
 def _strict_ids_drops(text: str, a: int, b: int):
     """The preset leaves text[a:b] (an [ID] span) in the text."""
     return not select_spans(text, [(a, b, "account_number")], ENTITY_PRESET)
@@ -760,6 +788,8 @@ def _detect(text: str):
                 and not any(x < case[1] and case[0] < y and u != t for x, y, u in doubts):
             if (*case, t) not in kept:
                 kept.append((*case, t))
+        elif DECODER == "default" and t == "ID" and not mixed and _cleanup_drops(text, a, b):
+            kept.append(_AccountCleanup((a, b, t)))
         elif ENTITY_PRESET != "default" and t == "ID" and not mixed and _strict_ids_drops(text, a, b):
             # not an identity or financial number: left in the text, but on the kept list, so that the copy rule
             # in scan_many and the log still see it
@@ -873,4 +903,4 @@ def health():
     # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
     return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
             "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK, "il_court_case": IL_COURT_CASE,
-            "entity_preset": ENTITY_PRESET}
+            "entity_preset": ENTITY_PRESET, "decoder": DECODER}

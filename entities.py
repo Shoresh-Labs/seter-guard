@@ -1,41 +1,49 @@
-"""Entity selection for Seter PII models (opt-in post-processing).
+"""Seter span decoder: account-number clean-up and entity selection.
 
-Seter labels every personal number as `account_number`, including customer, employee,
-student, patient and medical-file numbers, insurance policy numbers and card expiry dates.
-Some pipelines only want identity and financial numbers masked. This module narrows the
-`account_number` spans to those, and leaves every other label untouched.
+Apply this to the output of a Seter PII model. The model card's benchmark figures are measured with it.
 
 Presets
 -------
-"default"     No change. The spans you pass in are returned as they are.
-"strict-ids"  `account_number` keeps: national / identity numbers, passports, driving licences,
-              payment cards (including masked and last-4 forms), tax ids, bank accounts, IBANs.
-              It drops: customer / client / user / member / employee / student / patient ids,
-              medical-file numbers, insurance policy numbers, professional licence numbers,
-              reference-style codes (order, invoice, ticket, case, booking, ...), card expiry
-              dates and full dates or times. Edge punctuation is trimmed from kept spans.
-              Person, address, phone and email spans are never changed.
+"default"     Account-number clean-up (on by default). Only `account_number` spans are touched: edge
+              punctuation is trimmed, full dates and times are dropped, and a number is dropped when the
+              nearest word before it names a non-personal code (order, invoice, ticket, reference, case,
+              tracking, SKU, version, booking, ... in Hebrew, Arabic and English) and no identity word is
+              as close. IBAN, card and passport shapes are always kept.
+"strict-ids"  The clean-up, then `account_number` keeps only identity and financial numbers: national /
+              identity numbers, passports, driving licences, payment cards (including masked and last-4
+              forms), tax ids, bank accounts, IBANs. It also drops customer / client / user / member /
+              employee / student / patient ids, medical-file numbers, insurance policy numbers, professional
+              licence numbers, reference-style codes and card expiry dates.
+"none"        The spans exactly as the model returned them.
+Person, address, phone and email spans are never changed by any preset.
+
+Account-number calibration (fast model)
+---------------------------------------
+The fast model's figures also use an account-number logit offset of 1.0 (its account scores run high).
+`calibrate(model)` applies it once to a loaded transformers model; it does nothing for the large model.
+For ONNX, subtract ACCOUNT_BIAS from the B-/I-account_number logits before the argmax.
 
 Usage
 -----
     from transformers import pipeline
-    from seter_entities import select_entities
-    pii = pipeline("token-classification", model="shoresh-labs/seter-pii-he-ar", aggregation_strategy="simple")
+    from seter_entities import calibrate, select_entities
+    pii = pipeline("token-classification", model="shoresh-labs/seter-pii-he-ar-fast", aggregation_strategy="simple")
+    calibrate(pii.model)
     text = "ת\"ז 039876541, מספר לקוח 448812"
-    ents = select_entities(text, pii(text), preset="strict-ids")   # keeps the ID, drops the customer number
+    ents = select_entities(text, pii(text))                         # default: account clean-up, both numbers kept
+    ids = select_entities(text, pii(text), preset="strict-ids")     # keeps the ID, drops the customer number
 
 `entities` may be the list of dicts returned by the pipeline (keys start / end / entity_group)
 or a list of [start, end, label] spans. The same shape is returned.
-
-The rules work on Hebrew, Arabic and English context words (the 24-32 characters before a
-number, or the column header when the number sits in a CSV / TSV / pipe table).
 MIT License, Shoresh Labs.
 """
 import re
 
-__all__ = ["PRESETS", "select_entities", "select_spans"]
-__version__ = "1.0.0"
-PRESETS = ("default", "strict-ids")
+__all__ = ["PRESETS", "ACCOUNT_BIAS", "calibrate", "select_entities", "select_spans"]
+__version__ = "1.1.0"
+PRESETS = ("default", "strict-ids", "none")
+# account-number logit offset by model type: fast (ModernBERT / mmBERT) 1.0, large (XLM-R) 0.0
+ACCOUNT_BIAS = {"modernbert": 1.0, "xlm-roberta": 0.0}
 ACC = "account_number"
 
 # ---- stage 1: account span clean-up (dates, look-alike codes, edge punctuation)
@@ -153,19 +161,38 @@ def _ids_only(text, spans, win=32):
     return out
 
 
+def calibrate(model, account_bias=None):
+    """Subtract the account-number logit offset from a loaded transformers token-classification model, once.
+    account_bias=None picks it from the model type (ACCOUNT_BIAS). Returns the model."""
+    if getattr(model, "_seter_calibrated", False):
+        return model
+    if account_bias is None:
+        account_bias = ACCOUNT_BIAS.get(model.config.model_type, 0.0)
+    if account_bias:
+        import torch
+        ids = [int(i) for i, l in model.config.id2label.items() if str(l).endswith(ACC)]
+        with torch.no_grad():   # the token-classification head's final linear layer
+            model.classifier.bias[ids] -= float(account_bias)
+    model._seter_calibrated = True
+    return model
+
+
 def select_spans(text, spans, preset="default"):
     """spans: iterable of (start, end, label). Returns a new list of [start, end, label]."""
+    spans = [[int(a), int(b), ty] for a, b, ty in spans]
+    if preset == "none":
+        return spans
     if preset in (None, "default"):
-        return [list(s) for s in spans]
+        return _cleanup(text, spans)
     if preset == "strict-ids":
-        return _ids_only(text, _cleanup(text, [[int(a), int(b), ty] for a, b, ty in spans]))
+        return _ids_only(text, _cleanup(text, spans))
     raise ValueError(f"unknown preset {preset!r}; choose one of {PRESETS}")
 
 
 def select_entities(text, entities, preset="default"):
     """entities: pipeline output (dicts with start / end / entity_group or entity) or [start, end, label] spans."""
     entities = list(entities)
-    if preset in (None, "default"):
+    if preset == "none":
         return entities
     if not entities or not isinstance(entities[0], dict):
         return select_spans(text, entities, preset)
@@ -179,6 +206,5 @@ def select_entities(text, entities, preset="default"):
         kept = select_spans(text, [[e["start"], e["end"], ACC]], preset)
         if kept:
             a, b, _ = kept[0]
-            e = dict(e, start=a, end=b, word=text[a:b])
-            out.append(e)
+            out.append(dict(e, start=a, end=b, word=text[a:b]))
     return out
