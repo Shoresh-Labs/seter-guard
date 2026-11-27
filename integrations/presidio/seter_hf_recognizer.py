@@ -1,10 +1,12 @@
-"""Minimal Seter + Presidio setup, mirroring the GolemPII recipe.
+"""Minimal Seter + Presidio setup.
 
 Uses HuggingFaceNerRecognizer and NoOpNlpEngine. One recognizer is
 registered per language (he, ar, en) because HuggingFaceNerRecognizer
 accepts a single supported_language; a thin subclass makes them share one
 pipeline, so the model is built only once.
 """
+
+import unicodedata
 
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NoOpNlpEngine
@@ -37,6 +39,8 @@ def _shared_recognizer_class(shared: dict):
                 super().load()
                 shared["pipeline"] = self.ner_pipeline
             else:
+                # Reusing the shared pipeline skips Presidio's deferred TokenizerBasedTextChunker resolution;
+                # that is fine with the default CharacterBasedTextChunker.
                 self.ner_pipeline = shared["pipeline"]
 
     return SharedPipelineRecognizer
@@ -65,8 +69,23 @@ def create_analyzer(model_name: str = MODEL_ID) -> AnalyzerEngine:
     )
 
 
+def trim_span(text: str, start: int, end: int):
+    """Narrow (start, end) so the span neither starts nor ends with whitespace or Unicode punctuation
+    (category P), the same rule as _trim() in server.py."""
+    def edge(c):
+        return c.isspace() or unicodedata.category(c).startswith("P")
+
+    while start < end and edge(text[start]):
+        start += 1
+    while end > start and edge(text[end - 1]):
+        end -= 1
+    return start, end
+
+
 if __name__ == "__main__":
     analyzer = create_analyzer()
     text = "היי, כאן דנה מחיפה, הטלפון שלי 052-1234567"
     for result in analyzer.analyze(text=text, language="he"):
-        print(result.entity_type, result.score, text[result.start : result.end])
+        start, end = trim_span(text, result.start, result.end)
+        if start < end:
+            print(result.entity_type, result.score, text[start:end])

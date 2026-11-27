@@ -46,10 +46,10 @@ Run the bundled sample: `python seter_hf_recognizer.py`.
 analyzer = create_analyzer("shoresh-labs/seter-pii-he-ar-fast")  # faster on CPU
 ```
 
-In production, pin a revision (`v1.2` for large, `v1.1.1` for fast). Presidio's `HuggingFaceNerRecognizer` has no `revision` argument and loads the model by name, so this example cannot pin it and loads the newest revision of the repo. To pin, download the model at a fixed revision (for example with `huggingface_hub.snapshot_download(repo_id, revision="v1.2")`) and pass the local folder as `model_name`. The server in this repo pins with `SETER_MODEL=repo@version`.
+In production, pin a revision (`v1.2` for large, `v1.1.2` for fast). Presidio's `HuggingFaceNerRecognizer` has no `revision` argument and loads the model by name, so this example cannot pin it and loads the newest revision of the repo. To pin, download the model at a fixed revision (for example with `huggingface_hub.snapshot_download(repo_id, revision="v1.2")`) and pass the local folder as `model_name`. The server in this repo pins with `SETER_MODEL=repo@version`.
 
 ## Caveat: fast model span offsets
 
-On transformers 5.24.1 the fast model's pipeline often starts a span one character early (a leading space; 36 of 50 rows in our check). The large model was unaffected. Trim leading and trailing whitespace and punctuation on returned spans before using them. See the server's `_trim()` in this repo for a reference implementation.
+On transformers 5.24.1 the fast model's pipeline often starts a span one character early (a leading space; 36 of 50 rows in our check). The large model was unaffected. Trim leading and trailing whitespace and punctuation on returned spans before using them. See the server's `_trim()` in this repo for a reference implementation; the `__main__` sample in `seter_hf_recognizer.py` applies the same rule (`trim_span`) to each result before printing.
 
 This is a redaction aid, not an anonymization guarantee.
