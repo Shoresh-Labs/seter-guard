@@ -9,6 +9,7 @@ from functools import lru_cache
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, pipeline
+from entities import PRESETS, select_spans
 
 # v1.1.1 = the v1.1 weights with a config.json that transformers 4.x reads correctly. With v1.1 and
 # transformers 4.x the local-attention layers silently used the wrong rotary-position setting and the
@@ -85,6 +86,21 @@ TAGS = {"private_person": "PERSON", "private_address": "ADDRESS", "private_phone
         "private_email": "EMAIL", "account_number": "ID"}
 MIN_SCORE = float(os.environ.get("SETER_MIN_SCORE", "0.5"))
 ACTION = os.environ.get("SETER_ACTION", "mask")  # "mask" or "block"
+
+
+def _entity_preset():
+    """SETER_ENTITY_PRESET: `default` (or unset) changes nothing; `strict-ids` leaves non-identity numbers in the text."""
+    value = os.environ.get("SETER_ENTITY_PRESET", "").strip().lower() or "default"
+    if value not in PRESETS:
+        raise ValueError(f"SETER_ENTITY_PRESET={value!r}: use one of {', '.join(PRESETS)}")
+    return value
+
+
+ENTITY_PRESET = _entity_preset()
+
+
+class _StrictIds(tuple):
+    """A (start, end, type) span that the strict-ids preset released. Equal to the plain tuple; it only carries the reason."""
 
 
 # ---- Israeli identity numbers ------------------------------------------------------------------------
@@ -530,8 +546,10 @@ def _neighbour_has_cue(texts, i: int, a: int, b: int):
     return False
 
 
-def release_reason(text: str, a: int, b: int):
-    """Which check left text[a:b] in the text: the two never apply to the same span (nine bare digits, or not)."""
+def release_reason(text: str, a: int, b: int, span=None):
+    """Which check left text[a:b] in the text: the first two never apply to the same span (nine bare digits, or not)."""
+    if isinstance(span, _StrictIds):
+        return "strict_ids"
     return "il_id_check" if il_id_check(text[a:b]) is not None else "il_court_case"
 
 
@@ -688,6 +706,11 @@ def entities(text: str):
     return out
 
 
+def _strict_ids_drops(text: str, a: int, b: int):
+    """The preset leaves text[a:b] (an [ID] span) in the text."""
+    return not select_spans(text, [(a, b, "account_number")], ENTITY_PRESET)
+
+
 def _detect(text: str):
     """(spans to mask, spans that may be left in the text), each a list of (start, end, type), for one text."""
     out = []  # [start, end, type, type_is_from_owner, another_type_was_reported]
@@ -737,6 +760,10 @@ def _detect(text: str):
                 and not any(x < case[1] and case[0] < y and u != t for x, y, u in doubts):
             if (*case, t) not in kept:
                 kept.append((*case, t))
+        elif ENTITY_PRESET != "default" and t == "ID" and not mixed and _strict_ids_drops(text, a, b):
+            # not an identity or financial number: left in the text, but on the kept list, so that the copy rule
+            # in scan_many and the log still see it
+            kept.append(_StrictIds((a, b, t)))
         else:
             masked.append((a, b, t))
     return masked, kept
@@ -758,7 +785,7 @@ def scan_many(texts):
     numbers. Digits that only happen to line up across two other numbers count as a copy too: that masks."""
     found = [_detect(t) for t in texts]
     for i, (text, (masked, kept)) in enumerate(zip(texts, found)):   # a court case number next to a label in a neighbouring text
-        back = [s for s in kept if release_reason(text, s[0], s[1]) == "il_court_case" and _neighbour_has_cue(texts, i, s[0], s[1])]
+        back = [s for s in kept if release_reason(text, s[0], s[1], s) == "il_court_case" and _neighbour_has_cue(texts, i, s[0], s[1])]
         if back:
             found[i] = (masked + back, [s for s in kept if s not in back])
     key = lambda text, s: _digits(text[s[0]:s[1]]).lstrip("0") or "0"
@@ -769,9 +796,10 @@ def scan_many(texts):
     for text, (masked, kept) in zip(texts, found):
         stay = [s for s in kept if appears[key(text, s)] == releasing[key(text, s)]]
         out.append((sorted(masked + [s for s in kept if s not in stay]), stay))
-        for a, b, t in stay:  # both endpoints pass through here; position only, never the digits
+        for span in stay:  # both endpoints pass through here; position only, never the digits
+            a, b, t = span
             log.info("left unmasked by %s: %s at characters %d-%d of a %d-character text",
-                     release_reason(text, a, b), t, a, b, len(text))
+                     release_reason(text, a, b, span), t, a, b, len(text))
     return out
 
 
@@ -810,7 +838,7 @@ def redact(body: RedactIn):
     masked, found = _render(body.text, to_mask)
     # kept: detected and deliberately left in the text, so a log can tell that from "nothing found"
     return {"text": masked, "entities": found,
-            "kept": [{"type": t, "start": a, "end": b, "reason": release_reason(body.text, a, b)} for a, b, t in kept]}
+            "kept": [{"type": s[2], "start": s[0], "end": s[1], "reason": release_reason(body.text, s[0], s[1], s)} for s in kept]}
 
 
 class GuardIn(BaseModel):
@@ -844,4 +872,5 @@ def litellm_guardrail(body: GuardIn):
 def health():
     # revision: the version asked for (null when none was); commit: what is actually loaded (null for a folder)
     return {"ok": True, "model": MODEL, "source": "local" if IS_LOCAL else "hub", "pinned": bool(REVISION),
-            "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK, "il_court_case": IL_COURT_CASE}
+            "revision": REVISION, "commit": COMMIT, "il_id_check": IL_ID_CHECK, "il_court_case": IL_COURT_CASE,
+            "entity_preset": ENTITY_PRESET}
