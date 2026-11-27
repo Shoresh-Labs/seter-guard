@@ -41,6 +41,10 @@ guardrails:
 
 `SETER_ACTION=block` blocks requests containing personal data instead of masking them.
 
+## Presidio
+
+To use the Seter models inside Presidio instead, see [`integrations/presidio/`](integrations/presidio/README.md).
+
 ## Choosing and pinning the model
 
 `SETER_MODEL` is a Hugging Face repo followed by `@` and a version, or a local folder:
